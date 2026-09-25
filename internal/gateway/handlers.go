@@ -289,7 +289,10 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				h.AITokens.Add(uint64(resp.Usage.TotalTokens))
-			finish := "stop"
+			if h.Traffic != nil && resp.Usage.TotalTokens > 0 {
+				go func(tok int) { _ = h.Traffic.RecordMetrics(context.Background(), time.Now(), 0, int64(tok), 0) }(resp.Usage.TotalTokens)
+			}
+			finish := "stop" 
 			if resp.FinishReason != "" {
 				finish = resp.FinishReason
 			}
@@ -319,6 +322,9 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.AITokens.Add(uint64(resp.Usage.TotalTokens))
+		if h.Traffic != nil && resp.Usage.TotalTokens > 0 {
+			go func(tok int) { _ = h.Traffic.RecordMetrics(context.Background(), time.Now(), 0, int64(tok), 0) }(resp.Usage.TotalTokens)
+		}
 		if h.AuditLog != nil {
 			_ = h.AuditLog.Record(ctx, admin.AuditEvent{
 				RequestID: r.Header.Get("X-Request-ID"),
@@ -427,6 +433,11 @@ func (h *Handler) AudioSpeech(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.WriteHeader(200)
 	_, _ = w.Write(data)
+	if h.Traffic != nil && len(data) > 0 {
+		sec := int64(len(data) / 44100)
+		if sec == 0 { sec = 1 }
+		go func(s int64) { _ = h.Traffic.RecordMetrics(context.Background(), time.Now(), 0, 0, s) }(sec)
+	}
 }
 
 func (h *Handler) Images(w http.ResponseWriter, r *http.Request) {
@@ -661,11 +672,20 @@ func (h *Handler) LegacyTTS(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Text    string `json:"text"`
 		VoiceID string `json:"voice_id"`
+		Voice   string `json:"voice"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	audio, mime, err := h.Dispatcher.Speech(r.Context(), provider.SpeechRequest{Model: "piper:" + req.VoiceID, Input: req.Text, Voice: req.VoiceID})
+	voice := req.VoiceID
+	if voice == "" {
+		voice = req.Voice
+	}
+	model := "piper:" + strings.TrimPrefix(voice, "piper:")
+	if strings.HasPrefix(voice, "tiktok:") {
+		model = voice
+	}
+	audio, mime, err := h.Dispatcher.Speech(r.Context(), provider.SpeechRequest{Model: model, Input: req.Text, Voice: voice})
 	if err != nil {
 		log.Printf("[GATEWAY] legacy tts failed: %v", err)
 		status, userMsg, code := maskProviderError(err)

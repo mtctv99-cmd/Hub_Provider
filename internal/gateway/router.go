@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -41,10 +42,11 @@ func newRouterFull(h *Handler, apiKey string, dbKeys *admin.APIKeys, maxBodyByte
 	mux.HandleFunc("/v1/video/generations", h.VideoGenerations)
 	mux.HandleFunc("/v1/videos/tasks/", h.VideoTask)
 	mux.HandleFunc("/v1/files/", h.Files)
-	mux.HandleFunc("/api/tts/voices", h.TTSVoices)
-	mux.HandleFunc("/api/tts/generate", h.TTSGenerate)
-	mux.HandleFunc("/api/tts/synthesize", h.LegacyTTS)
-	mux.HandleFunc("/api/tts/clone", h.TTSClone)
+		mux.HandleFunc("/api/tts/voices", h.TTSVoices)
+		mux.HandleFunc("/api/tts/generate", h.TTSGenerate)
+		mux.HandleFunc("/api/tts/synthesize", h.LegacyTTS)
+		mux.HandleFunc("/v1/tts", h.LegacyTTS)
+		mux.HandleFunc("/api/tts/clone", h.TTSClone)
 	mux.HandleFunc("/api/tts/jobs/", h.TTSJob)
 	mux.HandleFunc("/api/llm/jobs", h.LLMJobCreate)
 	mux.HandleFunc("/api/llm/jobs/", h.LLMJob)
@@ -111,14 +113,29 @@ func newRouterFull(h *Handler, apiKey string, dbKeys *admin.APIKeys, maxBodyByte
 		mux.HandleFunc("/admin/api/traffic", h.TrafficHistory)
 	mux.HandleFunc("/internal/status", h.DashboardStatus)
 	mux.HandleFunc("/internal/events", h.Events)
-	if staticFS, err := fs.Sub(web.StaticFS, "."); err == nil {
-		mux.Handle("/web/", http.StripPrefix("/web", http.FileServer(http.FS(staticFS))))
-		mux.HandleFunc("/web", func(w http.ResponseWriter, r *http.Request) {
-			http.Redirect(w, r, "/web/", http.StatusMovedPermanently)
-		})
-		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/web/", http.StatusFound) })
+	var staticHandler http.Handler
+	if fi, err := os.Stat("web/index.html"); err == nil && !fi.IsDir() {
+		staticHandler = http.StripPrefix("/web", http.FileServer(http.Dir("web")))
+	} else if staticFS, err := fs.Sub(web.StaticFS, "."); err == nil {
+		staticHandler = http.StripPrefix("/web", http.FileServer(http.FS(staticFS)))
 	}
-	return withMiddleware(mux, h, apiKey, dbKeys, maxBodyBytes)
+		if staticHandler != nil {
+			mux.Handle("/web/", staticHandler)
+			mux.HandleFunc("/web", func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, "/web/", http.StatusMovedPermanently)
+			})
+				mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path != "/" {
+						http.NotFound(w, r)
+						return
+					}
+					http.Redirect(w, r, "/web/", http.StatusFound)
+				})
+		}
+		if _, err := os.Stat("models"); err == nil {
+			mux.Handle("/models/", http.StripPrefix("/models/", http.FileServer(http.Dir("models"))))
+		}
+		return withMiddleware(mux, h, apiKey, dbKeys, maxBodyBytes)
 }
 
 func withMiddleware(next http.Handler, h *Handler, apiKey string, dbKeys *admin.APIKeys, maxBodyBytes int64) http.Handler {
@@ -176,14 +193,15 @@ func withMiddleware(next http.Handler, h *Handler, apiKey string, dbKeys *admin.
 
 		// API Key authentication applies only to consumer API endpoints.
 		// Admin, internal, health, static files, and inbound worker WebSocket use their own auth mechanisms.
-		requiresAPIKey := !strings.HasPrefix(p, "/admin/") &&
-			!strings.HasPrefix(p, "/internal/") &&
-			!strings.HasPrefix(p, "/web/") &&
-			!strings.HasPrefix(p, "/web") &&
-			p != "/health" &&
-			p != "/ready" &&
-			p != "/" &&
-			p != "/api/llm/ws/worker"
+			requiresAPIKey := !strings.HasPrefix(p, "/admin/") &&
+				!strings.HasPrefix(p, "/internal/") &&
+				!strings.HasPrefix(p, "/web/") &&
+				!strings.HasPrefix(p, "/web") &&
+				!strings.HasPrefix(p, "/models/") &&
+				p != "/health" &&
+				p != "/ready" &&
+				p != "/" &&
+				p != "/api/llm/ws/worker"
 
 		if requiresAPIKey {
 			candidate := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
