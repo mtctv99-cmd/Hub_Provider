@@ -1,0 +1,43 @@
+# Local build/runtime artifacts
+*.exe
+*.exe~
+*.db
+*.db-shm
+*.db-wal
+/data/
+/tmp/
+NUL
+temp_*
+
+# Large Model Files
+*.onnx
+*.gguf
+*.bin
+models/*.onnx
+models/**/*.onnx
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+
+# Workspace & Agents
+.zcode/
+.playwright/
+
+# Secrets and provider session material
+.env
+.env.*
+!config/.env.example
+**/cookies.json
+**/*token*.json
+**/*session*.json
+**/*secret*.json
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

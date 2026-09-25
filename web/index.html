@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sever Provider Studio</title>
+  <link rel="stylesheet" href="/web/style.css" />
+</head>
+<body>
+  <section id="auth-overlay" class="auth-overlay" aria-modal="true" role="dialog">
+    <div class="auth-card">
+      <div class="auth-mark" aria-label="Sever Provider HUD logo">
+        <svg viewBox="0 0 64 64" role="img" aria-hidden="true">
+          <path class="hud-ring" d="M32 4a28 28 0 1 0 28 28"/>
+          <path class="hud-ring hud-ring-soft" d="M32 12a20 20 0 1 0 20 20"/>
+          <path class="hud-line" d="M32 20v24M20 32h24"/>
+          <path class="hud-core" d="M32 24l8 8-8 8-8-8 8-8Z"/>
+          <circle class="hud-dot" cx="32" cy="32" r="3"/>
+          <path class="hud-tick" d="M32 2v8M62 32h-8M32 62v-8M2 32h8"/>
+        </svg>
+      </div>
+      <div id="auth-login-view">
+        <h1>Đăng nhập</h1>
+        <form id="admin-login-form">
+          <input id="admin-password" class="form-input" type="password" placeholder="Mật khẩu" aria-label="Mật khẩu" autocomplete="current-password" required autofocus />
+          <div id="login-error" class="auth-error" role="alert"></div>
+          <button class="btn auth-submit" type="submit">Đăng nhập</button>
+        </form>
+      </div>
+      <div id="auth-first-login-view" hidden>
+        <h1>Chào mừng bạn</h1>
+        <p class="auth-copy">Đây là lần đầu đăng nhập. Bạn có muốn đổi mật khẩu không?</p>
+        <div class="auth-actions">
+          <button id="change-password-choice" class="btn auth-submit" type="button">Đổi mật khẩu</button>
+          <button id="skip-password-choice" class="btn btn-secondary" type="button">Không đổi, vào dashboard</button>
+        </div>
+      </div>
+      <div id="auth-change-view" hidden>
+        <h1>Đổi mật khẩu</h1>
+        <p class="auth-copy">Mật khẩu mới cần có ít nhất 6 ký tự.</p>
+        <form id="change-password-form">
+          <label class="form-label" for="new-admin-password">Mật khẩu mới</label>
+          <input id="new-admin-password" class="form-input" type="password" autocomplete="new-password" minlength="6" required />
+          <label class="form-label" for="confirm-admin-password">Nhập lại mật khẩu</label>
+          <input id="confirm-admin-password" class="form-input" type="password" autocomplete="new-password" minlength="6" required />
+          <div id="password-error" class="auth-error" role="alert"></div>
+          <button class="btn auth-submit" type="submit">Lưu mật khẩu</button>
+        </form>
+      </div>
+    </div>
+  </section>
+
+  <main class="container">
+    <!-- TAB 1: DASHBOARD (Cấu trúc theo đúng từng hàng được yêu cầu) -->
+    <section class="tab-panel active" data-panel="dashboard">
+      <section class="traffic-panel traffic-overview-panel" aria-label="Tổng quan traffic request">
+        <div class="traffic-panel-header">
+          <div class="traffic-title-wrap">
+            <span class="traffic-title">API Traffic</span>
+          </div>
+          <div class="traffic-periods" role="group" aria-label="Khoảng thời gian traffic">
+            <button type="button" class="traffic-period active" data-traffic-period="24h" aria-pressed="true">24h</button>
+            <button type="button" class="traffic-period" data-traffic-period="7d" aria-pressed="false">7 ngày</button>
+            <button type="button" class="traffic-period" data-traffic-period="1m" aria-pressed="false">1 tháng</button>
+            <button type="button" class="traffic-period" data-traffic-period="all" aria-pressed="false">Tất cả</button>
+          </div>
+        </div>
+        <div class="traffic-overview">
+          <div class="traffic-chart-shell">
+            <svg id="traffic-chart-svg" class="traffic-chart-svg" viewBox="0 0 600 120" preserveAspectRatio="none" aria-hidden="true">
+              <line x1="0" y1="30" x2="600" y2="30" class="traffic-grid" />
+              <line x1="0" y1="60" x2="600" y2="60" class="traffic-grid" />
+              <line x1="0" y1="90" x2="600" y2="90" class="traffic-grid" />
+              <polygon id="traffic-polygon" class="traffic-area" points="" />
+              <polyline id="traffic-polyline" class="traffic-line" points="" />
+            </svg>
+            <div id="traffic-chart-empty" class="traffic-empty-note">Đang tải lịch sử request…</div>
+          </div>
+          <div class="traffic-metrics">
+            <div class="traffic-metric">
+              <span class="traffic-metric-label">Tổng requests</span>
+              <strong class="traffic-metric-value" id="row1-req-total">0</strong>
+              <span class="traffic-metric-detail"><span id="row1-req-min">0.00</span> req/phút</span>
+            </div>
+            <div class="traffic-metric">
+              <span class="traffic-metric-label">Tokens AI</span>
+              <strong class="traffic-metric-value" id="row1-ai-tokens">0</strong>
+              <span class="traffic-metric-detail">Đã sử dụng</span>
+            </div>
+            <div class="traffic-metric">
+              <span class="traffic-metric-label">Tốc độ</span>
+              <strong class="traffic-metric-value"><span id="row2-req-sec">0.00</span><small> req/giây</small></strong>
+              <span class="traffic-metric-detail">Hiện tại</span>
+            </div>
+            <div class="traffic-metric">
+              <span class="traffic-metric-label">Thời gian xử lý</span>
+              <strong class="traffic-metric-value" id="row2-total-duration">0s</strong>
+              <span class="traffic-metric-detail" id="row2-avg-latency">0 ms avg</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="provider-requests" aria-label="Traffic request theo nhà cung cấp">
+        <div class="provider-requests-heading">Traffic request <span>theo nhà cung cấp</span></div>
+        <div class="provider-requests-grid">
+          <div class="provider-request-item"><span class="provider-request-name">Gemini</span><strong id="status-google-requests">0</strong></div>
+          <div class="provider-request-item"><span class="provider-request-name">TikTok</span><strong id="status-tiktok-requests">0</strong></div>
+          <div class="provider-request-item"><span class="provider-request-name">Colab</span><strong id="status-colab-requests">0</strong></div>
+          <div class="provider-request-item"><span class="provider-request-name">Copilot</span><strong id="status-copilot-requests">0</strong></div>
+        </div>
+      </section>
+    </section>
+
+    <!-- TAB 2: ACCOUNT MANAGER -->
+    <section class="tab-panel" data-panel="accounts">
+      <section class="provider-panel active" data-provider-section="google">
+        <div class="provider-actions-row">
+          <button class="btn" id="add-google-account">+ Thêm tài khoản Google</button>
+        </div>
+        <section id="account-list" class="account-grid"><div class="empty-state">Đang tải danh sách tài khoản Google…</div></section>
+      </section>
+      <div id="google-browser-status" class="browser-flow-status" hidden></div>
+
+
+      <section class="provider-panel" data-provider-section="tiktok">
+        <div class="provider-actions-row">
+          <button class="btn" id="add-tiktok-account">+ Thêm tài khoản TikTok</button>
+        </div>
+        <div id="tiktok-account-list" class="account-grid"></div>
+      </section>
+      <dialog id="add-tiktok-modal" class="provider-modal">
+        <form method="dialog" id="add-tiktok-form">
+          <div class="modal-header"><h3>Thêm phiên TikTok TTS</h3><button type="button" class="icon-button" id="close-tiktok-modal" aria-label="Đóng"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+          <label>Tên định danh (Email hoặc Label)<input id="tiktok-email-input" type="text" required placeholder="creator@tiktok"></label>
+          <label>TikTok Session ID (sessionid cookie)<input id="tiktok-session-input" type="text" required placeholder="dán sessionid từ cookie trình duyệt"></label>
+          <div class="modal-fields"><label>Max concurrency<input id="tiktok-concurrency-input" type="number" min="1" max="16" value="2"></label></div>
+          <p class="modal-help">Session ID chỉ lưu dạng mã hóa AES-256-GCM để tổng hợp giọng nói TikTok.</p>
+          <div class="modal-actions"><button type="button" class="btn secondary" id="cancel-tiktok-modal">Hủy</button><button type="submit" class="btn">Lưu phiên TikTok</button></div>
+        </form>
+      </dialog>
+
+      <section class="provider-panel" data-provider-section="copilot">
+        <div class="provider-actions-row">
+          <button class="btn" id="open-copilot-modal-btn" type="button">+ Dán Token URL</button>
+          <button class="btn secondary" id="add-copilot-account" type="button">Đăng nhập Browser</button>
+          <button class="btn secondary" id="stop-copilot-login" type="button" hidden>Dừng đăng nhập</button>
+        </div>
+        <div id="copilot-browser-status" class="browser-flow-status" role="status" hidden></div>
+        <div id="copilot-account-list" class="account-grid" aria-live="polite"><div class="empty-state">Đang tải danh sách tài khoản Copilot…</div></div>
+      </section>
+      <dialog id="add-copilot-modal" class="provider-modal" aria-labelledby="add-copilot-title">
+        <form id="add-copilot-form">
+          <div class="modal-header"><h3 id="add-copilot-title">Thêm tài khoản Copilot</h3><button type="button" class="icon-button" id="close-copilot-modal" aria-label="Đóng"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+          <label>Email (tùy chọn)<input id="copilot-email-input" type="email" autocomplete="email" placeholder="Tự động nhận diện từ token hoặc nhập email"></label>
+          <label>Token URL<input id="copilot-token-input" type="password" autocomplete="off" spellcheck="false" required placeholder="Dán Token URL"></label>
+          <div class="modal-fields">
+            <label>Max concurrency<input id="copilot-concurrency-input" type="number" min="1" step="1" value="1" required></label>
+            <label>Pool role<select id="copilot-role-input"><option value="AUTO">Auto</option><option value="SESSION">Session</option><option value="WORKER">Worker</option></select></label>
+          </div>
+          <p class="modal-help">Nhập Token URL (wss://substrate.office.com/m365Copilot/Chathub/...) lấy từ trình duyệt hoặc grab_token.py. Token được lưu mã hóa AES-GCM an toàn.</p>
+          <p id="copilot-form-error" class="auth-error" role="alert" hidden></p>
+          <div class="modal-actions"><button type="button" class="btn secondary" id="cancel-copilot-modal">Hủy</button><button type="submit" class="btn" id="submit-copilot-account">Lưu tài khoản</button></div>
+        </form>
+      </dialog>
+
+      <section class="provider-panel" data-provider-section="other">
+        <div class="empty-state">Các nhà cung cấp mới sẽ tự động hiển thị ở đây mà không cần đổi cấu trúc tab.</div>
+      </section>
+    </section>
+
+    <!-- TAB 3: SETTINGS -->
+    <section class="tab-panel" data-panel="settings">
+      <section class="settings-grid">
+        <article class="studio-panel settings-card">
+          <div class="panel-header">
+            <div>
+              <h3>API Keys</h3>
+            </div>
+            <button class="btn" id="create-api-key">+ Tạo Key Mới</button>
+          </div>
+          <p id="api-key-list-error" class="api-key-error" role="alert" hidden></p>
+          <div id="api-key-list" class="list" aria-live="polite">
+            <div class="empty-state">Đang nạp danh sách API keys…</div>
+          </div>
+        </article>
+
+        <article class="studio-panel settings-card">
+          <div class="panel-header"><div><h3>Piper TTS</h3></div></div>
+          <div class="settings-row"><span>Chế độ chạy</span><select id="piper-mode-select" class="settings-select"><option value="auto">Auto (local → remote)</option><option value="local">Local server</option><option value="remote">Remote worker</option></select></div>
+          <div id="piper-voice-settings" class="settings-list"><div class="empty-state">Đang nạp danh sách voice…</div></div>
+          <button class="btn" id="save-piper-settings">Lưu cấu hình Piper</button>
+        </article>
+
+        <article class="studio-panel settings-card worker-card" aria-labelledby="worker-management-title">
+          <div class="panel-header worker-card-header">
+            <div><h3 id="worker-management-title">Worker Management</h3><p class="worker-card-help">Trạng thái và điều khiển worker</p></div>
+            <button type="button" class="btn secondary" id="refresh-workers">Làm mới</button>
+          </div>
+          <p id="worker-load-error" class="api-key-error" role="alert" hidden></p>
+          <p id="worker-action-status" class="worker-action-status" role="status" aria-live="polite" hidden></p>
+          <div class="worker-groups" id="worker-groups">
+            <section class="worker-group" aria-labelledby="piper-local-title"><h4 id="piper-local-title">Piper local</h4><div id="worker-piper-local" class="worker-group-content"><div class="empty-state">Đang nạp…</div></div></section>
+            <section class="worker-group" aria-labelledby="piper-remote-title"><h4 id="piper-remote-title">Remote Piper workers</h4><div id="worker-piper-remote" class="worker-group-content"><div class="empty-state">Đang nạp…</div></div></section>
+            <section class="worker-group" aria-labelledby="colab-workers-title"><h4 id="colab-workers-title">Colab workers</h4><div id="worker-colab" class="worker-group-content"><div class="empty-state">Đang nạp…</div></div></section>
+            <section class="worker-group" aria-labelledby="colab-accounts-title"><h4 id="colab-accounts-title">Supervisor accounts</h4><div id="worker-accounts" class="worker-group-content"><div class="empty-state">Đang nạp…</div></div>
+              <div class="worker-controls"><label for="worker-account-select">Tài khoản Colab</label><select id="worker-account-select" class="settings-select" disabled><option value="">Chọn tài khoản</option></select><button type="button" class="btn secondary" id="start-colab-worker" disabled>Khởi chạy</button><button type="button" class="btn secondary" id="rotate-colab-worker" disabled>Luân phiên</button></div>
+              <p class="worker-card-help">Lệnh chỉ khả dụng khi supervisor đang hoạt động.</p>
+            </section>
+            <section class="worker-group" aria-labelledby="tiktok-slots-title"><h4 id="tiktok-slots-title">TikTok async slots</h4><div id="worker-tiktok-slots" class="worker-group-content"><div class="empty-state">Đang nạp…</div></div></section>
+          </div>
+        </article>
+      </section>
+    </section>
+  </main>
+
+  <dialog id="api-key-create-dialog" class="provider-modal api-key-dialog" aria-labelledby="api-key-create-title">
+    <form id="api-key-create-form">
+      <div class="modal-header"><h3 id="api-key-create-title">Tạo API key</h3><button type="button" class="icon-button" data-close-api-key-create aria-label="Đóng">×</button></div>
+      <label>Tên key<input id="api-key-name" type="text" maxlength="100" required autocomplete="off" placeholder="Ví dụ: production-app"></label>
+      <div class="modal-fields">
+        <label>Hết hạn<select id="api-key-expiry"><option value="7">7 ngày</option><option value="30" selected>30 ngày</option><option value="90">90 ngày</option><option value="0">Không hết hạn</option></select></label>
+        <label>Giới hạn request/phút<select id="api-key-rpm"><option value="0">Không giới hạn</option><option value="30">30 RPM</option><option value="60">60 RPM</option><option value="120">120 RPM</option></select></label>
+      </div>
+      <fieldset class="api-key-scopes"><legend>Quyền truy cập</legend>
+        <label><input type="checkbox" name="api-key-scope" value="all" checked> Tất cả (all)</label>
+        <label><input type="checkbox" name="api-key-scope" value="chat"> Chat</label>
+        <label><input type="checkbox" name="api-key-scope" value="audio_speech"> Audio speech</label>
+        <label><input type="checkbox" name="api-key-scope" value="images"> Images</label>
+        <label><input type="checkbox" name="api-key-scope" value="models"> Models</label>
+      </fieldset>
+      <p id="api-key-create-error" class="api-key-error" role="alert" hidden></p>
+      <div class="modal-actions"><button type="button" class="btn secondary" data-close-api-key-create>Hủy</button><button id="api-key-create-submit" class="btn" type="submit">Tạo key</button></div>
+    </form>
+  </dialog>
+  <dialog id="api-key-reveal-dialog" class="provider-modal api-key-dialog" aria-labelledby="api-key-reveal-title">
+    <div class="api-key-reveal-content">
+      <div class="modal-header"><h3 id="api-key-reveal-title">API key mới</h3><button type="button" class="icon-button" data-close-api-key-reveal aria-label="Đóng">×</button></div>
+      <p class="modal-help">Sao chép key ngay. Key sẽ không được hiển thị lại sau khi đóng cửa sổ này.</p>
+      <div class="api-key-secret-wrap"><code id="api-key-secret"></code><button type="button" class="btn secondary" id="api-key-copy">Sao chép</button></div>
+      <p id="api-key-copy-status" class="api-key-copy-status" role="status" aria-live="polite"></p>
+      <div class="modal-actions"><button type="button" class="btn" data-close-api-key-reveal>Đã lưu key, đóng</button></div>
+    </div>
+  </dialog>
+
+  <footer>
+    <span id="last-sync">—</span>
+  </footer>
+
+  <nav class="bottom-nav nav-tabs" aria-label="Control plane sections">
+    <button class="nav-tab tab active" data-tab="dashboard" title="Dashboard">
+      <span class="nav-tab-icon"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg></span>
+      <span class="nav-tab-label">Dashboard</span>
+    </button>
+    <div class="account-nav-wrap">
+      <button class="nav-tab tab account-nav" data-tab="accounts" title="Account Manager">
+        <span class="nav-tab-icon"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="8" r="3"/><path d="M5 20c.8-3.3 3.1-5 7-5s6.2 1.7 7 5"/></svg></span>
+        <span class="nav-tab-label">Accounts</span>
+      </button>
+      <span class="account-provider-dock" id="account-provider-dock" aria-label="Account Manager providers">
+        <span class="provider-switch active" data-provider-panel="google" title="Google / Gemini + Colab">
+          <span class="provider-tab-icon google" aria-hidden="true"><svg viewBox="0 0 48 48"><path fill="#4285F4" d="M47.5 24.55c0-1.57-.14-3.09-.4-4.55H24v8.6h13.18a11.28 11.28 0 0 1-4.9 7.4v6.16h7.93c4.65-4.28 7.29-10.58 7.29-17.61Z"/><path fill="#34A853" d="M24 48c6.65 0 12.23-2.2 16.3-5.84l-7.93-6.16c-2.2 1.48-5.02 2.36-8.37 2.36-6.43 0-11.88-4.34-13.83-10.18H2v6.35A24.6 24.6 0 0 0 24 48Z"/><path fill="#FBBC05" d="M10.17 28.18A14.76 14.76 0 0 1 9.4 24c0-1.45.27-2.86.77-4.18v-6.35H2A24 24 0 0 0 0 24c0 3.88.93 7.55 2.57 10.53l7.6-6.35Z"/><path fill="#EA4335" d="M24 9.64c3.62 0 6.86 1.24 9.42 3.68l7.06-7.06C36.22 2.39 30.64 0 24 0A24.6 24.6 0 0 0 2 13.47l8.17 6.35c1.95-5.84 7.4-10.18 13.83-10.18Z"/></svg></span>
+          <span class="provider-tab-label">Google</span>
+        </span>
+        <span class="provider-switch" data-provider-panel="tiktok" title="TikTok">
+          <span class="provider-tab-icon tiktok" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M19.59 6.69a4.83 4.83 0 0 1-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 0 1-5.2 1.74 2.89 2.89 0 0 1 2.31-4.64c.29 0 .58.04.85.12V9.4a6.33 6.33 0 0 0-.85-.06A6.34 6.34 0 0 0 3.1 15.68a6.34 6.34 0 0 0 10.83 4.48c1.3-1.3 2.02-3.05 2.02-4.9V8.62a8.27 8.27 0 0 0 4.84 1.55v-3.48h-1.2z"/></svg></span>
+          <span class="provider-tab-label">TikTok</span>
+        </span>
+        <span class="provider-switch" data-provider-panel="copilot" title="Microsoft Copilot">
+          <span class="provider-tab-icon copilot" aria-hidden="true"><svg viewBox="0 0 48 48"><path fill="#0EA5E9" d="M7 28c0-10.5 8.5-19 19-19 5.1 0 9.8 2 13.3 5.2l-5.1 5.1A11.6 11.6 0 0 0 26 15.9c-6.7 0-12.1 5.4-12.1 12.1 0 1.2.2 2.4.5 3.5L7 28Z"/><path fill="#6366F1" d="M14.4 31.5c2 5.2 6.5 8.7 11.6 8.7 4.3 0 8.1-2.3 10.2-5.7l-6.3-3.7a4.7 4.7 0 0 1-3.9 2.2c-2.3 0-4.3-1.3-5.3-3.2l-6.3 1.7Z"/><path fill="#A855F7" d="M36.2 16.1A19 19 0 0 1 41 28c0 2.3-.4 4.5-1.2 6.5l-6.7-2.6c.4-1.2.6-2.5.6-3.9 0-2.9-1-5.6-2.8-7.7l5.3-4.2Z"/></svg></span>
+          <span class="provider-tab-label">Copilot</span>
+        </span>
+        <span class="provider-switch" data-provider-panel="other" title="Khác">
+          <span class="provider-tab-icon other" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M11 3h2v8h8v2h-8v8h-2v-8H3v-2h8V3z"/></svg></span>
+          <span class="provider-tab-label">Khác</span>
+        </span>
+      </span>
+    </div>
+    <button class="nav-tab tab" data-tab="settings" title="Settings">
+      <span class="nav-tab-icon"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6 7 7M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/><circle cx="12" cy="12" r="3"/></svg></span>
+      <span class="nav-tab-label">Settings</span>
+    </button>
+  </nav>
+
+  <script src="/web/app.js"></script>
+</body>
+</html>

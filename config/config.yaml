@@ -1,0 +1,7 @@
+server:
+  host: 127.0.0.1
+  port: 8080
+  db_path: data/orchestrator.db
+  shutdown_grace_sec: 30
+  # Set API_KEY through the environment; do not commit secrets here.
+  api_key: ""
