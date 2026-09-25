@@ -293,7 +293,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 			if resp.FinishReason != "" {
 				finish = resp.FinishReason
 			}
-			msg := &provider.Message{Role: "assistant", Content: resp.Content, ToolCalls: resp.ToolCalls}
+			msg := &provider.Message{Role: "assistant", Content: resp.Content, ReasoningContent: resp.ReasoningContent, ToolCalls: resp.ToolCalls}
 			writeJSON(w, 200, ChatCompletionResponse{ID: resp.ID, Object: "chat.completion", Created: time.Now().Unix(), Model: req.Model, Choices: []Choice{{Index: 0, Message: msg, FinishReason: &finish}}, Usage: resp.Usage})
 			return
 		}
@@ -332,8 +332,8 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if resp.FinishReason != "" {
 			finish = resp.FinishReason
 		}
-		msg := &provider.Message{Role: "assistant", Content: resp.Content, ToolCalls: resp.ToolCalls}
-		writeJSON(w, 200, ChatCompletionResponse{ID: resp.ID, Object: "chat.completion", Created: time.Now().Unix(), Model: req.Model, Choices: []Choice{{Index: 0, Message: msg, FinishReason: &finish}}, Usage: resp.Usage})
+			msg := &provider.Message{Role: "assistant", Content: resp.Content, ReasoningContent: resp.ReasoningContent, ToolCalls: resp.ToolCalls}
+			writeJSON(w, 200, ChatCompletionResponse{ID: resp.ID, Object: "chat.completion", Created: time.Now().Unix(), Model: req.Model, Choices: []Choice{{Index: 0, Message: msg, FinishReason: &finish}}, Usage: resp.Usage})
 }
 
 func (h *Handler) streamChat(w http.ResponseWriter, ctx context.Context, req provider.ChatRequest) {
@@ -371,7 +371,7 @@ func (h *Handler) streamChat(w http.ResponseWriter, ctx context.Context, req pro
 					send(ErrorEnvelope{Error: APIError{Message: userMsg, Type: "provider_error", Code: code}})
 					return
 				}
-					delta := &provider.Message{Role: "assistant", Content: chunk.Content, ToolCalls: chunk.ToolCalls}
+					delta := &provider.Message{Role: "assistant", Content: chunk.Content, ReasoningContent: chunk.ReasoningContent, ToolCalls: chunk.ToolCalls}
 					var finish *string
 					if chunk.FinishReason != "" {
 						finish = &chunk.FinishReason
@@ -561,9 +561,9 @@ func (h *Handler) DashboardStatus(w http.ResponseWriter, r *http.Request) {
 	} else {
 		status["breakers"] = map[string]string{}
 	}
-	if h.Credentials != nil {
-		for _, domain := range []string{"gemini_web", "google_colab", "copilot_ws", "piper_local", "tiktok_api"} {
-			items, err := h.Credentials.List(r.Context(), domain)
+		if h.Credentials != nil {
+			for _, domain := range []string{"gemini_web", "google_colab", "copilot_ws", "piper_local", "tiktok_api", "deepseek_web"} {
+				items, err := h.Credentials.List(r.Context(), domain)
 			if err == nil {
 				if h.Leases != nil {
 					for i := range items {
@@ -609,6 +609,8 @@ func (h *Handler) DashboardStatus(w http.ResponseWriter, r *http.Request) {
 func modelProvider(model string) string {
 	model = strings.ToLower(strings.TrimSpace(model))
 	switch {
+	case strings.Contains(model, "deepseek"):
+		return "deepseek_web"
 	case strings.Contains(model, "tiktok"), strings.HasPrefix(model, "bv0"):
 		return "tiktok_api"
 	case strings.Contains(model, "colab"), strings.Contains(model, "gemma"):

@@ -6,6 +6,30 @@ models:
     capabilities: [chat, streaming, vision, image_generation]
     failover_to: [gemini-3.1-pro]
     timeout_sec: 90
+  deepseek-chat:
+    provider: deepseek_web
+    capabilities: [chat, streaming]
+    timeout_sec: 120
+  deepseek-flash:
+    provider: deepseek_web
+    capabilities: [chat, streaming]
+    timeout_sec: 120
+  deepseek-v4.1-flash:
+    provider: deepseek_web
+    capabilities: [chat, streaming]
+    timeout_sec: 120
+  deepseek-v4-flash:
+    provider: deepseek_web
+    capabilities: [chat, streaming]
+    timeout_sec: 120
+  deepseek-v4-pro:
+    provider: deepseek_web
+    capabilities: [chat, streaming, reasoning]
+    timeout_sec: 180
+  deepseek-reasoner:
+    provider: deepseek_web
+    capabilities: [chat, streaming, reasoning]
+    timeout_sec: 180
   gemini-3.1-pro:
     provider: gemini_web
     capabilities: [chat, streaming, reasoning, vision]

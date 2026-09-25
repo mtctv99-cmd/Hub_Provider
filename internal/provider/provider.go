@@ -21,12 +21,14 @@ const (
 	CapabilityVision    Capability = "vision"
 	CapabilitySpeech    Capability = "audio_speech"
 	CapabilityImage     Capability = "image_generation"
+	CapabilityReasoning Capability = "reasoning"
 )
 
 type Message struct {
-	Role       string        `json:"role"`
-	Content    string        `json:"content"`
-	Name       string        `json:"name,omitempty"`
+	Role             string        `json:"role"`
+	Content          string        `json:"content"`
+	ReasoningContent string        `json:"reasoning_content,omitempty"`
+	Name             string        `json:"name,omitempty"`
 	ToolCallID string        `json:"tool_call_id,omitempty"`
 	ToolCalls  []ToolCall    `json:"tool_calls,omitempty"`
 	Parts      []ContentPart `json:"content_parts,omitempty"`
@@ -54,20 +56,22 @@ type FunctionCallDesc struct {
 	Arguments string `json:"arguments"`
 }
 
-func (m *Message) UnmarshalJSON(data []byte) error {
-	var raw struct {
-		Role         string          `json:"role"`
-		Content      json.RawMessage `json:"content"`
-		Name         string          `json:"name"`
-		ToolCallID   string          `json:"tool_call_id"`
-		ToolCalls    []ToolCall      `json:"tool_calls"`
-		ContentParts []ContentPart   `json:"content_parts"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	m.Role = raw.Role
-	m.Name = raw.Name
+	func (m *Message) UnmarshalJSON(data []byte) error {
+		var raw struct {
+			Role             string          `json:"role"`
+			Content          json.RawMessage `json:"content"`
+			ReasoningContent string          `json:"reasoning_content"`
+			Name             string          `json:"name"`
+			ToolCallID       string          `json:"tool_call_id"`
+			ToolCalls        []ToolCall      `json:"tool_calls"`
+			ContentParts     []ContentPart   `json:"content_parts"`
+		}
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return err
+		}
+		m.Role = raw.Role
+		m.ReasoningContent = raw.ReasoningContent
+		m.Name = raw.Name
 	m.ToolCallID = raw.ToolCallID
 	m.ToolCalls = raw.ToolCalls
 	m.Parts = raw.ContentParts
@@ -162,18 +166,20 @@ type Usage struct {
 }
 
 type ChatResponse struct {
-	ID           string        `json:"id"`
-	Model        string        `json:"model"`
-	Content      string        `json:"content"`
-	ToolCalls    []ToolCall    `json:"tool_calls,omitempty"`
-	FinishReason string        `json:"finish_reason,omitempty"`
-	Usage        Usage         `json:"usage"`
-	Upstream     UpstreamState `json:"upstream,omitempty"`
+	ID               string        `json:"id"`
+	Model            string        `json:"model"`
+	Content          string        `json:"content"`
+	ReasoningContent string        `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall    `json:"tool_calls,omitempty"`
+	FinishReason     string        `json:"finish_reason,omitempty"`
+	Usage            Usage         `json:"usage"`
+	Upstream         UpstreamState `json:"upstream,omitempty"`
 }
 
 type StreamChunk struct {
-	Content      string        `json:"content"`
-	ToolCalls    []ToolCall    `json:"tool_calls,omitempty"`
+	Content          string        `json:"content"`
+	ReasoningContent string        `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall    `json:"tool_calls,omitempty"`
 	FinishReason string        `json:"finish_reason,omitempty"`
 	Done         bool          `json:"done"`
 	Usage        *Usage        `json:"usage,omitempty"`

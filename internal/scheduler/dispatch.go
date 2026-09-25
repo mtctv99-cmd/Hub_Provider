@@ -644,6 +644,8 @@ func (s ModelSpec) ProviderDomain() string {
 		return "piper_local"
 	case "tiktok_api":
 		return "tiktok_api"
+	case "deepseek_web":
+		return "deepseek_web"
 	default:
 		return s.Provider
 	}

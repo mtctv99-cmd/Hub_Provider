@@ -2,6 +2,7 @@ server:
   host: 0.0.0.0
   port: 18080
   db_path: data/orchestrator.db
+  master_key: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   shutdown_grace_sec: 30
   # Set API_KEY through the environment; do not commit secrets here.
   api_key: ""

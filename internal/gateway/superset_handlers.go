@@ -80,7 +80,18 @@ func (h *Handler) AnthropicMessages(w http.ResponseWriter, r *http.Request) {
 			Detail:    "success",
 		})
 	}
-	writeJSON(w, 200, map[string]any{"id": resp.ID, "type": "message", "role": "assistant", "model": req.Model, "content": []map[string]string{{"type": "text", "text": resp.Content}}, "stop_reason": "end_turn", "usage": resp.Usage})
+	var contentBlocks []map[string]any
+	if resp.ReasoningContent != "" {
+		contentBlocks = append(contentBlocks, map[string]any{
+			"type":     "thinking",
+			"thinking": resp.ReasoningContent,
+		})
+	}
+	contentBlocks = append(contentBlocks, map[string]any{
+		"type": "text",
+		"text": resp.Content,
+	})
+	writeJSON(w, 200, map[string]any{"id": resp.ID, "type": "message", "role": "assistant", "model": req.Model, "content": contentBlocks, "stop_reason": "end_turn", "usage": resp.Usage})
 }
 
 func (h *Handler) streamAnthropic(w http.ResponseWriter, ctx context.Context, req provider.ChatRequest) {
@@ -101,29 +112,54 @@ func (h *Handler) streamAnthropic(w http.ResponseWriter, ctx context.Context, re
 	id := "msg_" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	send := func(event string, payload any) {
 		b, _ := json.Marshal(payload)
-		fmt.Fprintf(w, "event: %s\\ndata: %s\\n\\n", event, b)
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
 		flusher.Flush()
 	}
-	send("message_start", map[string]any{"type": "message_start", "message": map[string]any{"id": id, "type": "message", "role": "assistant", "model": req.Model, "content": []any{}, "stop_reason": nil}})
-	send("content_block_start", map[string]any{"type": "content_block_start", "index": 0, "content_block": map[string]any{"type": "text", "text": ""}})
-	for chunk := range stream {
-		if chunk.Err != nil {
-			status, msg, code := maskProviderError(chunk.Err)
-			send("error", map[string]any{"type": "error", "error": map[string]any{"type": "api_error", "message": msg, "code": code}})
-			_ = status
-			return
+		send("message_start", map[string]any{"type": "message_start", "message": map[string]any{"id": id, "type": "message", "role": "assistant", "model": req.Model, "content": []any{}, "stop_reason": nil}})
+		thinkingStarted := false
+		textStarted := false
+		blockIndex := 0
+
+		for chunk := range stream {
+			if chunk.Err != nil {
+				status, msg, code := maskProviderError(chunk.Err)
+				send("error", map[string]any{"type": "error", "error": map[string]any{"type": "api_error", "message": msg, "code": code}})
+				_ = status
+				return
+			}
+			if chunk.ReasoningContent != "" {
+				if !thinkingStarted {
+					thinkingStarted = true
+					send("content_block_start", map[string]any{"type": "content_block_start", "index": blockIndex, "content_block": map[string]any{"type": "thinking", "thinking": ""}})
+				}
+				send("content_block_delta", map[string]any{"type": "content_block_delta", "index": blockIndex, "delta": map[string]any{"type": "thinking_delta", "thinking": chunk.ReasoningContent}})
+			}
+			if chunk.Content != "" {
+				if thinkingStarted && !textStarted {
+					send("content_block_stop", map[string]any{"type": "content_block_stop", "index": blockIndex})
+					blockIndex++
+				}
+				if !textStarted {
+					textStarted = true
+					send("content_block_start", map[string]any{"type": "content_block_start", "index": blockIndex, "content_block": map[string]any{"type": "text", "text": ""}})
+				}
+				send("content_block_delta", map[string]any{"type": "content_block_delta", "index": blockIndex, "delta": map[string]any{"type": "text_delta", "text": chunk.Content}})
+			}
+			if chunk.Done {
+				if !thinkingStarted && !textStarted {
+					send("content_block_start", map[string]any{"type": "content_block_start", "index": 0, "content_block": map[string]any{"type": "text", "text": ""}})
+					textStarted = true
+				}
+				send("content_block_stop", map[string]any{"type": "content_block_stop", "index": blockIndex})
+				send("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": "end_turn", "stop_sequence": nil}, "usage": usageOrEmpty(chunk.Usage)})
+				send("message_stop", map[string]any{"type": "message_stop"})
+				return
+			}
 		}
-		if chunk.Content != "" {
-			send("content_block_delta", map[string]any{"type": "content_block_delta", "index": 0, "delta": map[string]any{"type": "text_delta", "text": chunk.Content}})
+		if textStarted || thinkingStarted {
+			send("content_block_stop", map[string]any{"type": "content_block_stop", "index": blockIndex})
 		}
-		if chunk.Done {
-			send("content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
-			send("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": "end_turn", "stop_sequence": nil}, "usage": usageOrEmpty(chunk.Usage)})
-			send("message_stop", map[string]any{"type": "message_stop"})
-			return
-		}
-	}
-	send("message_stop", map[string]any{"type": "message_stop"})
+		send("message_stop", map[string]any{"type": "message_stop"})
 }
 
 func (h *Handler) VideoGenerations(w http.ResponseWriter, r *http.Request) {

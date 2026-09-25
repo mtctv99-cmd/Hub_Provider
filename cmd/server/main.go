@@ -25,9 +25,10 @@ import (
 	"sever_provider/internal/jobstore"
 	"sever_provider/internal/pool"
 	"sever_provider/internal/provider"
-	"sever_provider/internal/provider/colab"
-	"sever_provider/internal/provider/copilot"
-	"sever_provider/internal/provider/gemini"
+		"sever_provider/internal/provider/colab"
+		"sever_provider/internal/provider/copilot"
+		"sever_provider/internal/provider/deepseek"
+		"sever_provider/internal/provider/gemini"
 	"sever_provider/internal/provider/piper"
 	"sever_provider/internal/provider/tiktok"
 	"sever_provider/internal/scheduler"
@@ -63,10 +64,15 @@ func main() {
 	registry.Register(tiktok.New(nil, tiktokPool))
 	geminiAdapter := gemini.New(nil)
 	registry.Register(geminiAdapter)
-	registry.Register(copilot.New(nil))
-	registry.Register(colab.New(colab.Config{URL: os.Getenv("COLAB_WS_URL"), WorkerID: os.Getenv("COLAB_WORKER_ID"), APIKey: os.Getenv("COLAB_API_KEY")}))
+		registry.Register(copilot.New(nil))
+		registry.Register(colab.New(colab.Config{URL: os.Getenv("COLAB_WS_URL"), WorkerID: os.Getenv("COLAB_WORKER_ID"), APIKey: os.Getenv("COLAB_API_KEY")}))
+		registry.Register(deepseek.New(nil))
 
-	secretStore, err := secret.NewStore(os.Getenv("MASTER_KEY"))
+		masterKey := os.Getenv("MASTER_KEY")
+		if masterKey == "" {
+			masterKey = cfg.Server.MasterKey
+		}
+		secretStore, err := secret.NewStore(masterKey)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "secret store init failed: %v\n", err)
 		return

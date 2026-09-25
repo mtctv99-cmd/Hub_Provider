@@ -14,6 +14,7 @@ type Server struct {
 	Port                 int    `yaml:"port"`
 	DBPath               string `yaml:"db_path"`
 	APIKey               string `yaml:"api_key"`
+	MasterKey            string `yaml:"master_key"`
 	ShutdownGraceSec     int    `yaml:"shutdown_grace_sec"`
 	MaxRequestBodyBytes  int64  `yaml:"max_request_body_bytes"`
 	LeaseReclaimInterval int    `yaml:"lease_reclaim_interval_sec"`

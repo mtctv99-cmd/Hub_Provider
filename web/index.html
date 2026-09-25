@@ -105,6 +105,7 @@
         <div class="provider-requests-heading">Traffic request <span>theo nhà cung cấp</span></div>
         <div class="provider-requests-grid">
           <div class="provider-request-item"><span class="provider-request-name">Gemini</span><strong id="status-google-requests">0</strong></div>
+          <div class="provider-request-item"><span class="provider-request-name">DeepSeek</span><strong id="status-deepseek-requests">0</strong></div>
           <div class="provider-request-item"><span class="provider-request-name">TikTok</span><strong id="status-tiktok-requests">0</strong></div>
           <div class="provider-request-item"><span class="provider-request-name">Colab</span><strong id="status-colab-requests">0</strong></div>
           <div class="provider-request-item"><span class="provider-request-name">Copilot</span><strong id="status-copilot-requests">0</strong></div>
@@ -163,6 +164,14 @@
           <div class="modal-actions"><button type="button" class="btn secondary" id="cancel-copilot-modal">Hủy</button><button type="submit" class="btn" id="submit-copilot-account">Lưu tài khoản</button></div>
         </form>
       </dialog>
+
+      <section class="provider-panel" data-provider-section="deepseek">
+        <div class="provider-actions-row">
+          <button class="btn" id="add-deepseek-account">+ Thêm tài khoản DeepSeek</button>
+        </div>
+        <div id="deepseek-browser-status" class="browser-flow-status" role="status" hidden></div>
+        <div id="deepseek-account-list" class="account-grid" aria-live="polite"><div class="empty-state">Đang tải danh sách tài khoản DeepSeek…</div></div>
+      </section>
 
       <section class="provider-panel" data-provider-section="other">
         <div class="empty-state">Các nhà cung cấp mới sẽ tự động hiển thị ở đây mà không cần đổi cấu trúc tab.</div>
@@ -261,6 +270,10 @@
         <span class="provider-switch active" data-provider-panel="google" title="Google / Gemini + Colab">
           <span class="provider-tab-icon google" aria-hidden="true"><svg viewBox="0 0 48 48"><path fill="#4285F4" d="M47.5 24.55c0-1.57-.14-3.09-.4-4.55H24v8.6h13.18a11.28 11.28 0 0 1-4.9 7.4v6.16h7.93c4.65-4.28 7.29-10.58 7.29-17.61Z"/><path fill="#34A853" d="M24 48c6.65 0 12.23-2.2 16.3-5.84l-7.93-6.16c-2.2 1.48-5.02 2.36-8.37 2.36-6.43 0-11.88-4.34-13.83-10.18H2v6.35A24.6 24.6 0 0 0 24 48Z"/><path fill="#FBBC05" d="M10.17 28.18A14.76 14.76 0 0 1 9.4 24c0-1.45.27-2.86.77-4.18v-6.35H2A24 24 0 0 0 0 24c0 3.88.93 7.55 2.57 10.53l7.6-6.35Z"/><path fill="#EA4335" d="M24 9.64c3.62 0 6.86 1.24 9.42 3.68l7.06-7.06C36.22 2.39 30.64 0 24 0A24.6 24.6 0 0 0 2 13.47l8.17 6.35c1.95-5.84 7.4-10.18 13.83-10.18Z"/></svg></span>
           <span class="provider-tab-label">Google</span>
+        </span>
+        <span class="provider-switch" data-provider-panel="deepseek" title="DeepSeek Web">
+          <span class="provider-tab-icon deepseek" aria-hidden="true"><svg viewBox="0 0 24 24"><path fill="#0284C7" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg></span>
+          <span class="provider-tab-label">DeepSeek</span>
         </span>
         <span class="provider-switch" data-provider-panel="tiktok" title="TikTok">
           <span class="provider-tab-icon tiktok" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M19.59 6.69a4.83 4.83 0 0 1-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 0 1-5.2 1.74 2.89 2.89 0 0 1 2.31-4.64c.29 0 .58.04.85.12V9.4a6.33 6.33 0 0 0-.85-.06A6.34 6.34 0 0 0 3.1 15.68a6.34 6.34 0 0 0 10.83 4.48c1.3-1.3 2.02-3.05 2.02-4.9V8.62a8.27 8.27 0 0 0 4.84 1.55v-3.48h-1.2z"/></svg></span>

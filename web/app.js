@@ -176,8 +176,9 @@ function initTabs() {
     setTab('accounts');
     $$('.provider-switch').forEach(b => b.classList.toggle('active', b === x));
     $$('.provider-panel').forEach(p => p.classList.toggle('active', p.dataset.providerSection === x.dataset.providerPanel));
-    if (authReady && x.dataset.providerPanel === 'copilot') loadCopilotAccounts();
-    if (authReady && x.dataset.providerPanel === 'tiktok') loadTikTokAccounts();
+	    if (authReady && x.dataset.providerPanel === 'copilot') loadCopilotAccounts();
+	    if (authReady && x.dataset.providerPanel === 'deepseek') loadDeepSeekAccounts();
+	    if (authReady && x.dataset.providerPanel === 'tiktok') loadTikTokAccounts();
     accountNavWrap?.classList.remove('dock-open');
   }));
   const accountNavWrap = $('.account-nav-wrap');
@@ -298,6 +299,38 @@ function copilotCredentialStatus(account, credential) {
 }
 
 let lastTikTokMarkup = '';
+
+let lastDeepSeekMarkup = '';
+
+function renderDeepSeekAccounts(accounts) {
+  const list = $('#deepseek-account-list');
+  if (!list) return;
+  const markup = accounts.length ? accounts.map(a => `
+    <article class="account-card unified-account-card">
+      <div class="account-primary-info">
+        <h3 class="account-email">${esc(a.identity_id || a.id)}</h3>
+        <div class="account-badges"><span class="credential-pill ${a.status === 'HEALTHY' ? 'healthy' : 'partial'}">${esc(a.status || 'UNKNOWN')}</span>
+          <span class="credential-meta-pill">${esc(a.max_concurrency)} slots</span></div>
+      </div>
+      <div class="account-actions-group">
+        <button class="icon-button danger" data-deepseek-delete="${esc(a.identity_id)}" title="Xóa tài khoản DeepSeek">${icon('trash')}</button>
+      </div>
+    </article>`).join('') : '<div class="empty-state">Chưa có tài khoản DeepSeek. Nhấn "+ Thêm tài khoản DeepSeek" để thêm.</div>';
+  if (markup !== lastDeepSeekMarkup) { list.innerHTML = markup; lastDeepSeekMarkup = markup; }
+}
+
+async function loadDeepSeekAccounts() {
+  const list = $('#deepseek-account-list');
+  try {
+    const r = await fetchJSON('/admin/api/deepseek/accounts');
+    if (!r.ok) throw new Error('Không thể tải tài khoản DeepSeek.');
+    const data = await r.json();
+    if (!Array.isArray(data.accounts)) throw new Error('Danh sách tài khoản DeepSeek không hợp lệ.');
+    renderDeepSeekAccounts(data.accounts);
+  } catch (err) {
+    if (list) list.textContent = err.message || 'Không thể tải tài khoản DeepSeek.';
+  }
+}
 
 function renderTikTokAccounts(accounts) {
   const list = $('#tiktok-account-list');
@@ -504,11 +537,15 @@ async function refresh() {
   refreshTimer = null;
   try {
     const tab = activeTab();
-    if (tab === 'accounts' && visibleProvider() === 'copilot') {
-      await loadCopilotAccounts();
-      return;
-    }
-    if (tab === 'accounts' && visibleProvider() === 'tiktok') {
+	    if (tab === 'accounts' && visibleProvider() === 'copilot') {
+	      await loadCopilotAccounts();
+	      return;
+	    }
+	    if (tab === 'accounts' && visibleProvider() === 'deepseek') {
+	      await loadDeepSeekAccounts();
+	      return;
+	    }
+	    if (tab === 'accounts' && visibleProvider() === 'tiktok') {
       await loadTikTokAccounts();
       return;
     }
@@ -537,12 +574,13 @@ async function refresh() {
     if ($('#row2-total-duration')) $('#row2-total-duration').textContent = formatDuration(totalDurationMs);
     if ($('#row2-avg-latency')) $('#row2-avg-latency').textContent = `${averageLatencyMs} ms avg`;
     const providerRequests = status.provider_requests || {};
-    const requestCounters = {
-      'status-google-requests': providerRequests.gemini_web,
-      'status-tiktok-requests': providerRequests.tiktok_api,
-      'status-colab-requests': providerRequests.google_colab,
-      'status-copilot-requests': providerRequests.copilot_ws
-    };
+	    const requestCounters = {
+	      'status-google-requests': providerRequests.gemini_web,
+	      'status-deepseek-requests': providerRequests.deepseek_web,
+	      'status-tiktok-requests': providerRequests.tiktok_api,
+	      'status-colab-requests': providerRequests.google_colab,
+	      'status-copilot-requests': providerRequests.copilot_ws
+	    };
     for (const [id, value] of Object.entries(requestCounters)) {
       const counter = document.getElementById(id);
       if (counter) counter.textContent = Number(value || 0).toLocaleString();
@@ -870,13 +908,87 @@ $('#add-tiktok-form')?.addEventListener('submit', async event => {
     alert('Max concurrency phải từ 1 đến 16.');
     return;
   }
-  try {
-    const r = await fetchJSON('/admin/api/tts/tiktok/accounts', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email, session_id:session, max_concurrency:concurrency})});
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok) { alert(data?.error?.message || 'Không thể lưu session TikTok'); return; }
-    tiktokModal?.close(); $('#add-tiktok-form')?.reset(); alert('Đã lưu session TikTok dạng mã hóa.'); await loadTikTokAccounts();
-  } catch (err) { alert(err.message || 'Không thể lưu session TikTok'); }
-});
+	  try {
+	    const r = await fetchJSON('/admin/api/tts/tiktok/accounts', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email, session_id:session, max_concurrency:concurrency})});
+	    const data = await r.json().catch(() => ({}));
+	    if (!r.ok) { alert(data?.error?.message || 'Không thể lưu session TikTok'); return; }
+	    tiktokModal?.close(); $('#add-tiktok-form')?.reset(); alert('Đã lưu session TikTok dạng mã hóa.'); await loadTikTokAccounts();
+	  } catch (err) { alert(err.message || 'Không thể lưu session TikTok'); }
+	});
+
+	let deepseekLoginPoll = null;
+	function showDeepSeekBrowserStatus(message, type = 'info') {
+	  const el = $('#deepseek-browser-status');
+	  if (!el) return;
+	  el.hidden = !message;
+	  el.className = `browser-flow-status ${type}`.trim();
+	  el.textContent = message || '';
+	}
+	function stopDeepSeekLoginPoll() {
+	  if (deepseekLoginPoll) clearInterval(deepseekLoginPoll);
+	  deepseekLoginPoll = null;
+	}
+	async function pollDeepSeekLoginStatus() {
+	  try {
+	    const r = await fetchJSON('/admin/api/deepseek/auto-login/status');
+	    if (!r.ok) return;
+	    const status = await r.json();
+	    if (status.message) {
+	      showDeepSeekBrowserStatus(status.message, status.captured ? 'success' : status.running ? 'info' : 'error');
+	    }
+	    if (status.captured || !status.running) {
+	      stopDeepSeekLoginPoll();
+	      await loadDeepSeekAccounts();
+	    }
+	  } catch (_) {
+	    stopDeepSeekLoginPoll();
+	  }
+	}
+
+	$('#add-deepseek-account')?.addEventListener('click', async () => {
+	  const button = $('#add-deepseek-account');
+	  if (button) button.disabled = true;
+	  try {
+	    const r = await fetchJSON('/admin/api/deepseek/auto-login', {
+	      method: 'POST',
+	      headers: {'Content-Type': 'application/json'},
+	      body: '{}'
+	    });
+	    const data = await r.json().catch(() => ({}));
+	    if (!r.ok) {
+	      showDeepSeekBrowserStatus(data?.error?.message || 'Không thể mở browser DeepSeek trên server.', 'error');
+	      return;
+	    }
+	    showDeepSeekBrowserStatus('Đã mở browser DeepSeek. Hãy đăng nhập tài khoản trên cửa sổ trình duyệt; hệ thống sẽ tự lưu phiên và đóng trình duyệt khi hoàn tất.', 'info');
+	    stopDeepSeekLoginPoll();
+	    deepseekLoginPoll = setInterval(pollDeepSeekLoginStatus, 2000);
+	    await pollDeepSeekLoginStatus();
+	  } catch (err) {
+	    showDeepSeekBrowserStatus(err.message || 'Không thể mở browser DeepSeek.', 'error');
+	  } finally {
+	    if (button) button.disabled = false;
+	  }
+	});
+
+	$('#deepseek-account-list')?.addEventListener('click', async event => {
+	  const button = event.target.closest('[data-deepseek-delete]');
+	  const identityID = button?.dataset.deepseekDelete;
+	  if (!identityID || !confirm('Xóa tài khoản DeepSeek này và token đã mã hóa?')) return;
+	  button.disabled = true;
+	  try {
+	    const response = await fetchJSON('/admin/api/deepseek/accounts', {
+	      method: 'DELETE', headers: {'Content-Type': 'application/json'},
+	      body: JSON.stringify({identity_id: identityID})
+	    });
+	    const data = await response.json().catch(() => ({}));
+	    if (!response.ok) throw new Error(data?.error?.message || 'Không thể xóa tài khoản DeepSeek.');
+	    await loadDeepSeekAccounts();
+	  } catch (err) {
+	    alert(err.message || 'Không thể xóa tài khoản DeepSeek.');
+	  } finally {
+	    button.disabled = false;
+	  }
+	});
 
 const copilotModal = $('#add-copilot-modal');
 const copilotForm = $('#add-copilot-form');

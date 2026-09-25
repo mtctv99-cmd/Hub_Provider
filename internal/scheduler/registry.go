@@ -23,7 +23,34 @@ type ModelRegistry struct {
 	models map[string]ModelSpec
 }
 
-func NewModelRegistry() *ModelRegistry { return &ModelRegistry{models: make(map[string]ModelSpec)} }
+func DefaultDeepSeekChatModelSpec() ModelSpec {
+	return ModelSpec{
+		ID:           "deepseek-chat",
+		Provider:     "deepseek_web",
+		Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming},
+		TimeoutSec:   120,
+	}
+}
+
+func DefaultDeepSeekReasonerModelSpec() ModelSpec {
+	return ModelSpec{
+		ID:           "deepseek-reasoner",
+		Provider:     "deepseek_web",
+		Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming, provider.CapabilityReasoning},
+		TimeoutSec:   180,
+	}
+}
+
+func NewModelRegistry() *ModelRegistry {
+	r := &ModelRegistry{models: make(map[string]ModelSpec)}
+	_ = r.Register(DefaultDeepSeekChatModelSpec())
+	_ = r.Register(DefaultDeepSeekReasonerModelSpec())
+	_ = r.Register(ModelSpec{ID: "deepseek-flash", Provider: "deepseek_web", Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming}, TimeoutSec: 120})
+	_ = r.Register(ModelSpec{ID: "deepseek-v4.1-flash", Provider: "deepseek_web", Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming}, TimeoutSec: 120})
+	_ = r.Register(ModelSpec{ID: "deepseek-v4-flash", Provider: "deepseek_web", Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming}, TimeoutSec: 120})
+	_ = r.Register(ModelSpec{ID: "deepseek-v4-pro", Provider: "deepseek_web", Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming, provider.CapabilityReasoning}, TimeoutSec: 180})
+	return r
+}
 func (r *ModelRegistry) Register(spec ModelSpec) error {
 	if spec.ID == "" || spec.Provider == "" {
 		return fmt.Errorf("model id and provider are required")

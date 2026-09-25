@@ -2,7 +2,6 @@ package jobs
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -175,35 +174,11 @@ func (r *Runner) remotePiperSpeech(ctx context.Context, model string, req TTSReq
 	if r.Workers == nil {
 		return nil, "", errors.New("remote Piper worker hub is unavailable")
 	}
-	stream, err := r.Workers.Submit(ctx, model, map[string]any{"text": req.Text, "voice_id": req.VoiceID, "response_format": "wav"})
-	if err != nil {
-		return nil, "", fmt.Errorf("remote Piper worker unavailable: %w", err)
-	}
-	var audio []byte
-	mime := ""
-	for event := range stream.Events {
-		if event.AudioBase64 != "" {
-			if len(event.AudioBase64) > 48*1024*1024 {
-				return nil, "", errors.New("remote audio payload exceeds limit")
-			}
-			chunk, decodeErr := base64.StdEncoding.DecodeString(event.AudioBase64)
-			if decodeErr != nil || len(chunk) > 32*1024*1024 || len(audio)+len(chunk) > 32*1024*1024 {
-				return nil, "", errors.New("invalid or oversized remote audio")
-			}
-			audio = append(audio, chunk...)
-			mime = event.MIME
-		}
-	}
-	if errCh, ok := <-stream.Err; ok && errCh != nil {
-		return nil, "", errCh
-	}
-	if len(audio) == 0 {
-		return nil, "", errors.New("remote Piper worker returned empty audio")
-	}
-	if mime != "audio/wav" && mime != "audio/mpeg" {
-		mime = "audio/wav"
-	}
-	return audio, mime, nil
+	return r.Workers.Speech(ctx, provider.SpeechRequest{
+		Model: model,
+		Input: req.Text,
+		Voice: req.VoiceID,
+	})
 }
 
 func (r *Runner) processLLM(ctx context.Context, job jobstore.Job) error {
