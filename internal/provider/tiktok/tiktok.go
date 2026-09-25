@@ -216,10 +216,27 @@ func (a *Adapter) Speech(ctx context.Context, req provider.SpeechRequest, creden
 	if len(parts) == 0 {
 		return nil, "", errors.New("tts input is empty")
 	}
-	voice := req.Voice
-	if voice == "" {
-		voice = "BV075_streaming"
-	}
+		voice := req.Voice
+		if strings.HasPrefix(voice, "tiktok:") {
+			voice = strings.TrimPrefix(voice, "tiktok:")
+		}
+		switch voice {
+		case "vi_male":
+			voice = "BV074_streaming"
+		case "vi_female":
+			voice = "BV075_streaming"
+		case "":
+			if strings.HasPrefix(req.Model, "tiktok:") {
+				voice = strings.TrimPrefix(req.Model, "tiktok:")
+				if voice == "vi_male" {
+					voice = "BV074_streaming"
+				} else if voice == "vi_female" {
+					voice = "BV075_streaming"
+				}
+			} else {
+				voice = "BV075_streaming"
+			}
+		}
 
 	var secret struct {
 		SessionID string `json:"session_id"`

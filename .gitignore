@@ -8,6 +8,8 @@
 /tmp/
 NUL
 temp_*
+sever-provider*
+ds2api_temp/
 
 # Large Model Files
 *.onnx

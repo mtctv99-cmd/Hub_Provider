@@ -60,6 +60,11 @@ func Load(dir string) (Config, error) {
 			cfg.Models[k] = v
 		}
 	}
+		if h := os.Getenv("SERVER_HOST"); h != "" {
+			cfg.Server.Host = h
+		} else if h := os.Getenv("HOST"); h != "" {
+			cfg.Server.Host = h
+		}
 		if p := os.Getenv("SERVER_PORT"); p != "" {
 			if n, err := strconv.Atoi(p); err == nil {
 				cfg.Server.Port = n

@@ -346,7 +346,7 @@ func (m *Manager) List(ctx context.Context, domain string) ([]Credential, error)
 		query += " WHERE domain=?"
 		args = append(args, domain)
 	}
-	query += " ORDER BY last_used_at IS NOT NULL, last_used_at ASC"
+	query += " ORDER BY status='HEALTHY' DESC, last_used_at IS NOT NULL, last_used_at ASC"
 	rows, err := m.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err

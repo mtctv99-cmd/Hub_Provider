@@ -177,22 +177,41 @@ func main() {
 	supervisor := &jobs.Supervisor{Jobs: jobStore, Files: mediaStore, Sessions: sessions}
 	supervisor.Start(reclaimCtx)
 	router := gateway.NewRouterWithLimits(handler, cfg.Server.APIKey, cfg.Server.MaxRequestBodyBytes)
-	server := &http.Server{Addr: fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port), Handler: router, ReadHeaderTimeout: 10 * time.Second, WriteTimeout: 5 * time.Minute}
-	serverErr := make(chan error, 1)
-	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			serverErr <- err
+		server := &http.Server{Addr: fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port), Handler: router, ReadHeaderTimeout: 10 * time.Second, WriteTimeout: 5 * time.Minute}
+		var secondaryServers []*http.Server
+		if os.Getenv("DISABLE_LEGACY_PORTS") != "true" {
+			legacyPorts := []int{8081, 8090, 8095}
+			for _, port := range legacyPorts {
+				if port == cfg.Server.Port {
+					continue
+				}
+				secServer := &http.Server{Addr: fmt.Sprintf("%s:%d", cfg.Server.Host, port), Handler: router, ReadHeaderTimeout: 10 * time.Second, WriteTimeout: 5 * time.Minute}
+				secondaryServers = append(secondaryServers, secServer)
+				go func(s *http.Server, p int) {
+					if err := s.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+						fmt.Fprintf(os.Stderr, "legacy port %d note: %v\n", p, err)
+					}
+				}(secServer, port)
+			}
 		}
-	}()
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	select {
-	case err := <-serverErr:
-		fmt.Fprintf(os.Stderr, "server listen failed: %v\n", err)
-		return
-	case <-stop:
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.Server.ShutdownGraceSec)*time.Second)
-	defer cancel()
-	_ = server.Shutdown(ctx)
+		serverErr := make(chan error, 1)
+		go func() {
+			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				serverErr <- err
+			}
+		}()
+		stop := make(chan os.Signal, 1)
+		signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+		select {
+		case err := <-serverErr:
+			fmt.Fprintf(os.Stderr, "server listen failed: %v\n", err)
+			return
+		case <-stop:
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.Server.ShutdownGraceSec)*time.Second)
+		defer cancel()
+		for _, s := range secondaryServers {
+			_ = s.Shutdown(ctx)
+		}
+		_ = server.Shutdown(ctx)
 }

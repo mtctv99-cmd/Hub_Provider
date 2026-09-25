@@ -10,8 +10,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"sever_provider/internal/identity"
-)
+		"sever_provider/internal/identity"
+		"sever_provider/internal/provider"
+	)
 
 type Lease struct {
 	ID           string
@@ -95,11 +96,15 @@ func (m *LeaseManager) AcquireCredential(ctx context.Context, credentialID, requ
 	}
 	for {
 		m.mu.Lock()
-		if lease, ok := m.tryAcquireCredentialLocked(credentialID, requestID, ttl); ok {
+		lease, ok, canRetry := m.tryAcquireCredentialLocked(credentialID, requestID, ttl)
+		if ok {
 			m.mu.Unlock()
 			return lease, nil
 		}
 		m.mu.Unlock()
+		if !canRetry {
+			return Lease{}, provider.ErrNoCapacity
+		}
 		select {
 		case <-ctx.Done():
 			return Lease{}, ctx.Err()
@@ -108,22 +113,22 @@ func (m *LeaseManager) AcquireCredential(ctx context.Context, credentialID, requ
 	}
 }
 
-func (m *LeaseManager) tryAcquireCredentialLocked(credentialID, requestID string, ttl time.Duration) (Lease, bool) {
+func (m *LeaseManager) tryAcquireCredentialLocked(credentialID, requestID string, ttl time.Duration) (Lease, bool, bool) {
 	now := m.now()
 	c, ok := m.capacities[credentialID]
 	if !ok {
-		return Lease{}, false
+		return Lease{}, false, false
 	}
 	if (c.Status != identity.StatusHealthy && c.Status != identity.StatusDegraded) || now.Before(c.CooldownUntil) {
-		return Lease{}, false
+		return Lease{}, false, false
 	}
 	if atomic.LoadInt32(&c.ActiveLeases) >= int32(c.MaxConcurrency) {
-		return Lease{}, false
+		return Lease{}, false, true
 	}
 	atomic.AddInt32(&c.ActiveLeases, 1)
 	lease := Lease{ID: randomID("lease"), CredentialID: c.CredentialID, Domain: c.Domain, RequestID: requestID, AcquiredAt: now, ExpiresAt: now.Add(ttl)}
 	m.leases[lease.ID] = lease
-	return lease, true
+	return lease, true, false
 }
 
 func (m *LeaseManager) tryAcquireLocked(domain, requestID string, ttl time.Duration) (Lease, bool) {

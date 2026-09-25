@@ -89,15 +89,19 @@ func (d *Dispatcher) chatOnce(ctx context.Context, req provider.ChatRequest) (pr
 	if err != nil {
 		return provider.ChatResponse{}, err
 	}
-	if len(creds) == 0 && spec.GuestAllowed {
-		return d.chatGuest(ctx, req, spec)
-	}
-	if upstream, ok := d.sessionUpstream(req.SessionID); ok {
-		req.Upstream = upstream
-	}
-	creds = d.orderedCredentials(creds, req.SessionID)
-	now := time.Now()
+		if len(creds) == 0 && spec.GuestAllowed {
+			return d.chatGuest(ctx, req, spec)
+		}
+		if upstream, ok := d.sessionUpstream(req.SessionID); ok {
+			req.Upstream = upstream
+		}
+		creds = d.orderedCredentials(creds, req.SessionID)
+		fmt.Printf("[DISPATCH] Chat model %s, total creds: %d\n", req.Model, len(creds))
+		now := time.Now()
 	for _, cred := range creds {
+		if (cred.Status != identity.StatusHealthy && cred.Status != identity.StatusDegraded) || (cred.CooldownUntil != nil && now.Before(*cred.CooldownUntil)) {
+			continue
+		}
 		if d.Breakers != nil {
 			if !d.Breakers.Get(spec.Provider).Allow(now) {
 				continue
@@ -113,23 +117,26 @@ func (d *Dispatcher) chatOnce(ctx context.Context, req provider.ChatRequest) (pr
 			}
 			d.Leases.Register(capacity)
 		}
-		lease, err := d.acquireCredential(ctx, cred.ID, cred.Domain, req.Model, spec.TimeoutSec)
-		if err != nil {
-			continue
-		}
-		secret, secretErr := d.Credentials.ReadSecret(ctx, cred.ID)
-		if secretErr != nil {
+			lease, err := d.acquireCredential(ctx, cred.ID, cred.Domain, req.Model, spec.TimeoutSec)
+			if err != nil {
+				fmt.Printf("[DISPATCH] acquireCredential %s err: %v\n", cred.ID, err)
+				continue
+			}
+			secret, secretErr := d.Credentials.ReadSecret(ctx, cred.ID)
+			if secretErr != nil {
+				fmt.Printf("[DISPATCH] ReadSecret %s err: %v\n", cred.ID, secretErr)
+				d.release(lease)
+				d.recordAttempt(ctx, spec.Provider, cred.ID, fmt.Errorf("credential secret: %w", secretErr))
+				continue
+			}
+			resp, callErr := adapter.Chat(ctx, req, secret)
 			d.release(lease)
-			d.recordAttempt(ctx, spec.Provider, cred.ID, fmt.Errorf("credential secret: %w", secretErr))
-			continue
-		}
-		resp, callErr := adapter.Chat(ctx, req, secret)
-		d.release(lease)
-		d.recordAttempt(ctx, spec.Provider, cred.ID, callErr)
-		if callErr == nil {
-			d.bindSession(req.SessionID, cred.ID, spec.Provider, resp.Upstream)
-			return resp, nil
-		}
+			d.recordAttempt(ctx, spec.Provider, cred.ID, callErr)
+			if callErr == nil {
+				d.bindSession(req.SessionID, cred.ID, spec.Provider, resp.Upstream)
+				return resp, nil
+			}
+			fmt.Printf("[DISPATCH] adapter.Chat %s err: %v\n", cred.ID, callErr)
 	}
 	return provider.ChatResponse{}, ErrNoAvailableCredential
 }
@@ -205,6 +212,9 @@ func (d *Dispatcher) StreamChat(ctx context.Context, req provider.ChatRequest) (
 	creds = d.orderedCredentials(creds, req.SessionID)
 	now := time.Now()
 	for _, cred := range creds {
+		if (cred.Status != identity.StatusHealthy && cred.Status != identity.StatusDegraded) || (cred.CooldownUntil != nil && now.Before(*cred.CooldownUntil)) {
+			continue
+		}
 		if d.Breakers != nil {
 			if !d.Breakers.Get(spec.Provider).Allow(now) {
 				continue
@@ -337,6 +347,9 @@ func (d *Dispatcher) Image(ctx context.Context, req provider.ImageRequest) (prov
 	}
 	now := time.Now()
 	for _, cred := range creds {
+		if (cred.Status != identity.StatusHealthy && cred.Status != identity.StatusDegraded) || (cred.CooldownUntil != nil && now.Before(*cred.CooldownUntil)) {
+			continue
+		}
 		if d.Breakers != nil {
 			if !d.Breakers.Get(spec.Provider).Allow(now) {
 				continue
@@ -372,6 +385,9 @@ func (d *Dispatcher) Speech(ctx context.Context, req provider.SpeechRequest) ([]
 	voice := req.Voice
 	if voice == "" && strings.HasPrefix(req.Model, "piper:") {
 		voice = strings.TrimPrefix(req.Model, "piper:")
+	}
+	if voice == "" && strings.HasPrefix(req.Model, "tiktok:") {
+		voice = strings.TrimPrefix(req.Model, "tiktok:")
 	}
 	remoteMode := strings.HasPrefix(req.Model, "piper:") && d.Settings != nil && d.Settings.Get(ctx, "tts.piper_mode", "auto") == "remote"
 	localMode := strings.HasPrefix(req.Model, "piper:") && d.Settings != nil && d.Settings.Get(ctx, "tts.piper_mode", "auto") == "local"
@@ -438,6 +454,9 @@ func (d *Dispatcher) Speech(ctx context.Context, req provider.SpeechRequest) ([]
 	}
 	now := time.Now()
 	for _, cred := range creds {
+		if (cred.Status != identity.StatusHealthy && cred.Status != identity.StatusDegraded) || (cred.CooldownUntil != nil && now.Before(*cred.CooldownUntil)) {
+			continue
+		}
 		if d.Breakers != nil {
 			if !d.Breakers.Get(spec.Provider).Allow(now) {
 				continue

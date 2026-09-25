@@ -282,6 +282,7 @@ class CombinedWorker:
 
 
 def model_path(root, name):
+    root = Path(root)
     candidates = [root / name / (name + '.onnx'), root / (name + '.onnx')]
     if name == 'ngochuyennew':
         candidates.insert(0, root / 'ngoc_huyen' / 'ngochuyennew.onnx')
@@ -379,6 +380,7 @@ def resolve_model_id(config_path, requested):
 
 
 def load_voices(root, khmer_rate=22050, providers=None, khmer_onnx=None, khmer_config=None, use_cuda=False):
+    root = Path(root)
     if providers is None:
         providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if use_cuda else ['CPUExecutionProvider']
     voices = {}
