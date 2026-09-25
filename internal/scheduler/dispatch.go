@@ -89,15 +89,14 @@ func (d *Dispatcher) chatOnce(ctx context.Context, req provider.ChatRequest) (pr
 	if err != nil {
 		return provider.ChatResponse{}, err
 	}
-		if len(creds) == 0 && spec.GuestAllowed {
-			return d.chatGuest(ctx, req, spec)
-		}
-		if upstream, ok := d.sessionUpstream(req.SessionID); ok {
-			req.Upstream = upstream
-		}
-		creds = d.orderedCredentials(creds, req.SessionID)
-		fmt.Printf("[DISPATCH] Chat model %s, total creds: %d\n", req.Model, len(creds))
-		now := time.Now()
+	if len(creds) == 0 && spec.GuestAllowed {
+		return d.chatGuest(ctx, req, spec)
+	}
+	if upstream, ok := d.sessionUpstream(req.SessionID); ok {
+		req.Upstream = upstream
+	}
+	creds = d.orderedCredentials(creds, req.SessionID)
+	now := time.Now()
 	for _, cred := range creds {
 		if (cred.Status != identity.StatusHealthy && cred.Status != identity.StatusDegraded) || (cred.CooldownUntil != nil && now.Before(*cred.CooldownUntil)) {
 			continue
@@ -117,26 +116,23 @@ func (d *Dispatcher) chatOnce(ctx context.Context, req provider.ChatRequest) (pr
 			}
 			d.Leases.Register(capacity)
 		}
-			lease, err := d.acquireCredential(ctx, cred.ID, cred.Domain, req.Model, spec.TimeoutSec)
-			if err != nil {
-				fmt.Printf("[DISPATCH] acquireCredential %s err: %v\n", cred.ID, err)
-				continue
-			}
-			secret, secretErr := d.Credentials.ReadSecret(ctx, cred.ID)
-			if secretErr != nil {
-				fmt.Printf("[DISPATCH] ReadSecret %s err: %v\n", cred.ID, secretErr)
-				d.release(lease)
-				d.recordAttempt(ctx, spec.Provider, cred.ID, fmt.Errorf("credential secret: %w", secretErr))
-				continue
-			}
-			resp, callErr := adapter.Chat(ctx, req, secret)
+		lease, err := d.acquireCredential(ctx, cred.ID, cred.Domain, req.Model, spec.TimeoutSec)
+		if err != nil {
+			continue
+		}
+		secret, secretErr := d.Credentials.ReadSecret(ctx, cred.ID)
+		if secretErr != nil {
 			d.release(lease)
-			d.recordAttempt(ctx, spec.Provider, cred.ID, callErr)
-			if callErr == nil {
-				d.bindSession(req.SessionID, cred.ID, spec.Provider, resp.Upstream)
-				return resp, nil
-			}
-			fmt.Printf("[DISPATCH] adapter.Chat %s err: %v\n", cred.ID, callErr)
+			d.recordAttempt(ctx, spec.Provider, cred.ID, fmt.Errorf("credential secret: %w", secretErr))
+			continue
+		}
+		resp, callErr := adapter.Chat(ctx, req, secret)
+		d.release(lease)
+		d.recordAttempt(ctx, spec.Provider, cred.ID, callErr)
+		if callErr == nil {
+			d.bindSession(req.SessionID, cred.ID, spec.Provider, resp.Upstream)
+			return resp, nil
+		}
 	}
 	return provider.ChatResponse{}, ErrNoAvailableCredential
 }
