@@ -50,9 +50,17 @@ type BatchSpeechItemResponse struct {
 	B64JSON     string `json:"b64_json,omitempty"`
 	ContentType string `json:"content_type,omitempty"`
 	MIMEType    string `json:"mime_type,omitempty"`
+	Mime        string `json:"mime,omitempty"`
 	Status      string `json:"status"`
 	Error       string `json:"error,omitempty"`
 	LatencyMS   int64  `json:"latency_ms,omitempty"`
+}
+
+// BatchSpeechResponse represents the envelope format for batch speech results.
+type BatchSpeechResponse struct {
+	Results        []BatchSpeechItemResponse `json:"results"`
+	TotalItems     int                       `json:"total_items"`
+	BatchLatencyMS int64                     `json:"batch_latency_ms"`
 }
 
 // isSpeechWorker checks whether a connected worker offers speech/TTS capabilities.
@@ -229,45 +237,52 @@ func (h *Handler) BatchAudioSpeech(w http.ResponseWriter, r *http.Request) {
 					}
 					return
 				}
-				b64 := base64.StdEncoding.EncodeToString(data)
-				results[idx] = BatchSpeechItemResponse{
-					ID:          it.ID,
-					Index:       idx,
-					AudioBase64: b64,
-					B64JSON:     b64,
-					ContentType: mime,
-					MIMEType:    mime,
-					Status:      "success",
-					LatencyMS:   itemElapsed,
-				}
-				audioBytesMu.Lock()
-				totalAudioBytes += int64(len(data))
-				audioBytesMu.Unlock()
-			}(i)
+					b64 := base64.StdEncoding.EncodeToString(data)
+					results[idx] = BatchSpeechItemResponse{
+						ID:          it.ID,
+						Index:       idx,
+						AudioBase64: b64,
+						B64JSON:     b64,
+						ContentType: mime,
+						MIMEType:    mime,
+						Mime:        mime,
+						Status:      "ok",
+						LatencyMS:   itemElapsed,
+					}
+					audioBytesMu.Lock()
+					totalAudioBytes += int64(len(data))
+					audioBytesMu.Unlock()
+				}(i)
+			}
+
+		wg.Wait()
+
+		if h.AuditLog != nil {
+			_ = h.AuditLog.Record(r.Context(), admin.AuditEvent{
+				RequestID: r.Header.Get("X-Request-ID"),
+				EventType: "speech_batch",
+				Model:     req.Model,
+				Latency:   time.Since(started),
+				Detail:    fmt.Sprintf("total=%d", len(items)),
+			})
+		}
+		if h.Traffic != nil && totalAudioBytes > 0 {
+			sec := int64(totalAudioBytes / 44100)
+			if sec == 0 {
+				sec = 1
+			}
+			go func(s int64) { _ = h.Traffic.RecordMetrics(context.Background(), time.Now(), 0, 0, s) }(sec)
 		}
 
-	wg.Wait()
-
-	if h.AuditLog != nil {
-		_ = h.AuditLog.Record(r.Context(), admin.AuditEvent{
-			RequestID: r.Header.Get("X-Request-ID"),
-			EventType: "speech_batch",
-			Model:     req.Model,
-			Latency:   time.Since(started),
-			Detail:    fmt.Sprintf("total=%d", len(items)),
-		})
-	}
-	if h.Traffic != nil && totalAudioBytes > 0 {
-		sec := int64(totalAudioBytes / 44100)
-		if sec == 0 {
-			sec = 1
+		resp := BatchSpeechResponse{
+			Results:        results,
+			TotalItems:     len(results),
+			BatchLatencyMS: time.Since(started).Milliseconds(),
 		}
-		go func(s int64) { _ = h.Traffic.RecordMetrics(context.Background(), time.Now(), 0, 0, s) }(sec)
-	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	if err := json.NewEncoder(w).Encode(results); err != nil {
-		log.Printf("[GATEWAY] failed to encode batch speech response: %v", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			log.Printf("[GATEWAY] failed to encode batch speech response: %v", err)
+		}
 	}
-}

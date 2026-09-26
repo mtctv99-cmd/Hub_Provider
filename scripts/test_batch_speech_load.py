@@ -56,10 +56,11 @@ def main():
         print("Error response:", resp.text)
         return
 
-    results = resp.json()
+    resp_data = resp.json()
+    results = resp_data.get("results", resp_data) if isinstance(resp_data, dict) else resp_data
     print(f"Received results count: {len(results)}")
 
-    success_count = sum(1 for r in results if r.get("status") == "success")
+    success_count = sum(1 for r in results if r.get("status") in ("success", "ok"))
     latencies = [r.get("latency_ms", 0) for r in results if "latency_ms" in r]
     avg_item_latency_ms = (sum(latencies) / len(latencies)) if latencies else 0.0
     items_per_second = len(results) / (batch_latency_ms / 1000.0)

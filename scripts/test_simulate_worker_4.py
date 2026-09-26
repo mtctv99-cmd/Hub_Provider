@@ -128,11 +128,12 @@ def main():
             for i in range(10)
         ]
     }
-    r = requests.post(BATCH_URL, headers=headers, json=test_batch, timeout=30)
-    print(f"Batch response HTTP {r.status_code}")
-    res_items = r.json()
-    success_count = sum(1 for item in res_items if item.get("status") == "success")
-    print(f"Batch success items: {success_count}/{len(res_items)}")
+	    r = requests.post(BATCH_URL, headers=headers, json=test_batch, timeout=30)
+	    print(f"Batch response HTTP {r.status_code}")
+	    res_data = r.json()
+	    res_items = res_data.get("results", res_data) if isinstance(res_data, dict) else res_data
+	    success_count = sum(1 for item in res_items if item.get("status") in ("success", "ok"))
+	    print(f"Batch success items: {success_count}/{len(res_items)}")
     print(f"Requests handled by Node 4 during batch: {len(worker_4_handled)} (IDs: {worker_4_handled})")
 
     print("\n[STEP 5] Gracefully stopping Node 4 worker and verifying deregistration...")

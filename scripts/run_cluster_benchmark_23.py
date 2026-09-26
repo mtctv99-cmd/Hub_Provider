@@ -65,11 +65,12 @@ def main():
     batch_latency_ms = (t1 - t0) * 1000.0
 
     assert resp.status_code == 200, f"Batch request failed: {resp.status_code} {resp.text}"
-    results = resp.json()
+    resp_data = resp.json()
+    results = resp_data.get("results", resp_data) if isinstance(resp_data, dict) else resp_data
     assert len(results) == 23, f"Expected 23 results, got {len(results)}"
 
     # 3. Analyze results
-    success_count = sum(1 for r in results if r.get("status") == "success")
+    success_count = sum(1 for r in results if r.get("status") in ("success", "ok"))
     assert success_count == 23, f"Not all items succeeded: {success_count}/23"
 
     latencies = [r.get("latency_ms", 0) for r in results]

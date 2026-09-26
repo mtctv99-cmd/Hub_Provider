@@ -107,27 +107,28 @@ func TestBatchAudioSpeech_Format1_Inputs(t *testing.T) {
 		t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var results []BatchSpeechItemResponse
-	if err := json.NewDecoder(rec.Body).Decode(&results); err != nil {
-		t.Fatalf("failed to decode response array: %v", err)
-	}
+		var resp BatchSpeechResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("failed to decode response array: %v", err)
+		}
+		results := resp.Results
 
-	if len(results) != 3 {
-		t.Fatalf("expected 3 results, got %d", len(results))
-	}
+		if len(results) != 3 {
+			t.Fatalf("expected 3 results, got %d", len(results))
+		}
 
-	for i, r := range results {
-		expectedID := fmt.Sprintf("%d", i)
-		expectedAudio := base64.StdEncoding.EncodeToString([]byte("RIFF-WAV-câu " + fmt.Sprintf("%d", i+1)))
-		if r.ID != expectedID {
-			t.Errorf("item %d: expected id %q, got %q", i, expectedID, r.ID)
-		}
-		if r.Index != i {
-			t.Errorf("item %d: expected index %d, got %d", i, i, r.Index)
-		}
-		if r.Status != "success" {
-			t.Errorf("item %d: expected status success, got %q", i, r.Status)
-		}
+		for i, r := range results {
+			expectedID := fmt.Sprintf("%d", i)
+			expectedAudio := base64.StdEncoding.EncodeToString([]byte("RIFF-WAV-câu " + fmt.Sprintf("%d", i+1)))
+			if r.ID != expectedID {
+				t.Errorf("item %d: expected id %q, got %q", i, expectedID, r.ID)
+			}
+			if r.Index != i {
+				t.Errorf("item %d: expected index %d, got %d", i, i, r.Index)
+			}
+			if r.Status != "ok" {
+				t.Errorf("item %d: expected status ok, got %q", i, r.Status)
+			}
 		if r.AudioBase64 != expectedAudio {
 			t.Errorf("item %d: unexpected audio_base64", i)
 		}
@@ -159,21 +160,22 @@ func TestBatchAudioSpeech_Format2_Items(t *testing.T) {
 		t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var results []BatchSpeechItemResponse
-	if err := json.NewDecoder(rec.Body).Decode(&results); err != nil {
-		t.Fatalf("failed to decode response array: %v", err)
-	}
+		var resp BatchSpeechResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("failed to decode response array: %v", err)
+		}
+		results := resp.Results
 
-	if len(results) != 2 {
-		t.Fatalf("expected 2 results, got %d", len(results))
-	}
+		if len(results) != 2 {
+			t.Fatalf("expected 2 results, got %d", len(results))
+		}
 
-	if results[0].ID != "custom-1" || results[0].Index != 0 || results[0].Status != "success" {
-		t.Errorf("item 0 mismatch: %+v", results[0])
-	}
-	if results[1].ID != "custom-2" || results[1].Index != 1 || results[1].Status != "success" {
-		t.Errorf("item 1 mismatch: %+v", results[1])
-	}
+		if results[0].ID != "custom-1" || results[0].Index != 0 || results[0].Status != "ok" {
+			t.Errorf("item 0 mismatch: %+v", results[0])
+		}
+		if results[1].ID != "custom-2" || results[1].Index != 1 || results[1].Status != "ok" {
+			t.Errorf("item 1 mismatch: %+v", results[1])
+		}
 }
 
 func TestBatchAudioSpeech_Format2_ItemInheritance(t *testing.T) {
@@ -197,20 +199,21 @@ func TestBatchAudioSpeech_Format2_ItemInheritance(t *testing.T) {
 		t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var results []BatchSpeechItemResponse
-	if err := json.NewDecoder(rec.Body).Decode(&results); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
+		var resp BatchSpeechResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+		results := resp.Results
 
-	if len(results) != 2 {
-		t.Fatalf("expected 2 results, got %d", len(results))
-	}
-	if results[0].ID != "0" || results[0].Status != "success" {
-		t.Errorf("item 0 failed inheritance: %+v", results[0])
-	}
-	if results[1].ID != "item-2" || results[1].Status != "success" {
-		t.Errorf("item 1 failed: %+v", results[1])
-	}
+		if len(results) != 2 {
+			t.Fatalf("expected 2 results, got %d", len(results))
+		}
+		if results[0].ID != "0" || results[0].Status != "ok" {
+			t.Errorf("item 0 failed inheritance: %+v", results[0])
+		}
+		if results[1].ID != "item-2" || results[1].Status != "ok" {
+			t.Errorf("item 1 failed: %+v", results[1])
+		}
 }
 
 func TestBatchAudioSpeech_MaxBatchSizeCalculation(t *testing.T) {
@@ -411,27 +414,28 @@ func TestBatchAudioSpeech_PartialFailurePreservesOrder(t *testing.T) {
 		t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var results []BatchSpeechItemResponse
-	if err := json.NewDecoder(rec.Body).Decode(&results); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
+		var resp BatchSpeechResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+		results := resp.Results
 
-	if len(results) != 3 {
-		t.Fatalf("expected 3 results, got %d", len(results))
-	}
+		if len(results) != 3 {
+			t.Fatalf("expected 3 results, got %d", len(results))
+		}
 
-	// Index 0: success
-	if results[0].Index != 0 || results[0].Status != "success" || results[0].AudioBase64 == "" {
-		t.Errorf("item 0 unexpected: %+v", results[0])
-	}
-	// Index 1: error
-	if results[1].Index != 1 || results[1].Status != "error" || results[1].Error == "" {
-		t.Errorf("item 1 unexpected: %+v", results[1])
-	}
-	// Index 2: success
-	if results[2].Index != 2 || results[2].Status != "success" || results[2].AudioBase64 == "" {
-		t.Errorf("item 2 unexpected: %+v", results[2])
-	}
+		// Index 0: success -> "ok"
+		if results[0].Index != 0 || results[0].Status != "ok" || results[0].AudioBase64 == "" {
+			t.Errorf("item 0 unexpected: %+v", results[0])
+		}
+		// Index 1: error
+		if results[1].Index != 1 || results[1].Status != "error" || results[1].Error == "" {
+			t.Errorf("item 1 unexpected: %+v", results[1])
+		}
+		// Index 2: success -> "ok"
+		if results[2].Index != 2 || results[2].Status != "ok" || results[2].AudioBase64 == "" {
+			t.Errorf("item 2 unexpected: %+v", results[2])
+		}
 }
 
 func TestBatchAudioSpeech_WorkerHubFanOut(t *testing.T) {
@@ -504,19 +508,20 @@ func TestBatchAudioSpeech_WorkerHubFanOut(t *testing.T) {
 		t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var results []BatchSpeechItemResponse
-	if err := json.NewDecoder(rec.Body).Decode(&results); err != nil {
-		t.Fatalf("failed to decode: %v", err)
-	}
-
-	if len(results) != 3 {
-		t.Fatalf("expected 3 results, got %d", len(results))
-	}
-	for i, r := range results {
-		if r.Index != i || r.Status != "success" {
-			t.Errorf("result %d error: %+v", i, r)
+		var resp BatchSpeechResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("failed to decode: %v", err)
 		}
-	}
+		results := resp.Results
+
+		if len(results) != 3 {
+			t.Fatalf("expected 3 results, got %d", len(results))
+		}
+		for i, r := range results {
+			if r.Index != i || r.Status != "ok" {
+				t.Errorf("result %d error: %+v", i, r)
+			}
+		}
 }
 
 func TestBatchAudioSpeech_RouterAndAuth(t *testing.T) {
