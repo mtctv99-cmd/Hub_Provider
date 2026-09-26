@@ -418,10 +418,33 @@ func (d *Dispatcher) Speech(ctx context.Context, req provider.SpeechRequest) ([]
 			return nil, "", err
 		}
 
-	spec, configured := d.Models.Get(req.Model)
-	if !configured {
-		return nil, "", fmt.Errorf("model %q is not configured", req.Model)
-	}
+		spec, configured := d.Models.Get(req.Model)
+		if !configured {
+			if strings.HasPrefix(req.Model, "piper:") {
+				alt := "tiktok:" + strings.TrimPrefix(req.Model, "piper:")
+				if s, c := d.Models.Get(alt); c {
+					spec, configured = s, c
+					req.Model = alt
+				}
+			} else if strings.HasPrefix(req.Model, "tiktok:") {
+				alt := "piper:" + strings.TrimPrefix(req.Model, "tiktok:")
+				if s, c := d.Models.Get(alt); c {
+					spec, configured = s, c
+					req.Model = alt
+				}
+			} else {
+				if s, c := d.Models.Get("piper:" + req.Model); c {
+					spec, configured = s, c
+					req.Model = "piper:" + req.Model
+				} else if s, c := d.Models.Get("tiktok:" + req.Model); c {
+					spec, configured = s, c
+					req.Model = "tiktok:" + req.Model
+				}
+			}
+		}
+		if !configured {
+			return nil, "", fmt.Errorf("model %q is not configured", req.Model)
+		}
 	if spec.Provider == "piper_local" && d.Settings != nil && !d.Settings.GetBool(ctx, "tts.voice."+voice+".enabled", true) {
 		return nil, "", fmt.Errorf("piper voice %q is disabled", voice)
 	}
