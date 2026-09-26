@@ -246,15 +246,29 @@ class ColabRotator:
                 session.proxies.update(warp_proxies)
 
             client = Client(Prod(), session)
-            notebook_hash = uuid.uuid4()
-            LOG.info("[%s] Requesting T4 GPU session from Google Colab API...", email)
 
-            result = await asyncio.to_thread(
-                client.assign,
-                notebook_hash,
-                variant=Variant.GPU,
-                accelerator=Accelerator.T4
-            )
+            existing = await asyncio.to_thread(client.list_assignments)
+            result = None
+            for old in existing:
+                if getattr(old, "accelerator", None) == Accelerator.T4 and getattr(old, "runtime_proxy_info", None):
+                    LOG.info("[%s] Found existing active T4 assignment: %s", email, old.endpoint)
+                    result = old
+                    break
+                else:
+                    try:
+                        await asyncio.to_thread(client.unassign, old.endpoint)
+                    except Exception:
+                        pass
+
+            if not result:
+                notebook_hash = uuid.uuid4()
+                LOG.info("[%s] Requesting T4 GPU session from Google Colab API...", email)
+                result = await asyncio.to_thread(
+                    client.assign,
+                    notebook_hash,
+                    variant=Variant.GPU,
+                    accelerator=Accelerator.T4
+                )
 
             url = result.runtime_proxy_info.url
             token = result.runtime_proxy_info.token
@@ -419,8 +433,8 @@ sys.argv = [
         if success:
             self.db.set_cooldown(email, cooldown_until=0.0, last_used_at=now, state="ACTIVE")
         else:
-            # 1h penalty cooldown on allocation failure
-            self.db.set_cooldown(email, cooldown_until=now + 3600, last_used_at=now, state="COOLDOWN")
+            # 3m penalty cooldown on transient allocation failure (avoid locking pool for 1h)
+            self.db.set_cooldown(email, cooldown_until=now + 180, last_used_at=now, state="COOLDOWN")
 
     def status_summary(self) -> list[dict]:
         all_accounts = self.get_available_accounts()

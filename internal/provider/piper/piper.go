@@ -76,7 +76,7 @@ func (a *Adapter) RefreshVoices() error {
 		if len(parts) == 2 && strings.TrimSuffix(parts[0], filepath.Ext(parts[0])) == id {
 			id = parts[0]
 		}
-		if id == "" || strings.ContainsAny(id, `/\\`) || id == "khmer_tts_v3" {
+		if id == "" || strings.ContainsAny(id, `/\\`) || id == "khmer_tts_v3" || id == "ngoc_huyen" {
 			return nil
 		}
 		found[id] = Voice{ID: id, Name: id, Engine: "piper", Language: languageForVoice(id), ModelPath: path}
@@ -198,7 +198,7 @@ func (a *Adapter) modelPath(voice string) string {
 		filepath.Join(a.ModelsDir, voice, voice+".onnx"),
 		filepath.Join(a.ModelsDir, voice+".onnx"),
 	}
-	if voice == "ngochuyennew" {
+	if voice == "ngochuyennew" || voice == "ngoc_huyen" {
 		candidates = append([]string{filepath.Join(a.ModelsDir, "ngoc_huyen", "ngochuyennew.onnx")}, candidates...)
 	}
 	for _, path := range candidates {

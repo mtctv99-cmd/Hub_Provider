@@ -431,47 +431,97 @@ function relativeWhen(value) {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
+let currentTrafficChartData = null;
+const activeMetrics = new Set(['requests', 'tokens', 'audio', 'duration']);
+
+function applyTrafficMetricVisibility() {
+  const toggle = (el, show) => { if (el) el.style.display = show ? '' : 'none'; };
+  toggle($('#traffic-polyline'), activeMetrics.has('requests'));
+  toggle($('#traffic-polygon'), activeMetrics.has('requests'));
+  toggle($('#traffic-polyline-tokens'), activeMetrics.has('tokens'));
+  toggle($('#traffic-polygon-tokens'), activeMetrics.has('tokens'));
+  toggle($('#traffic-polyline-audio'), activeMetrics.has('audio'));
+  toggle($('#traffic-polygon-audio'), activeMetrics.has('audio'));
+  toggle($('#traffic-polyline-duration'), activeMetrics.has('duration'));
+  toggle($('#traffic-polygon-duration'), activeMetrics.has('duration'));
+}
+
 function renderTrafficChart(data) {
-  const line = $('#traffic-polyline');
-  const area = $('#traffic-polygon');
   const empty = $('#traffic-chart-empty');
-  if (!line || !area || !empty) return;
+  if (!empty) return;
   const buckets = Array.isArray(data?.buckets) ? data.buckets : [];
   if (!buckets.length) {
-    if (lastTrafficPoints !== '') {
-      line.setAttribute('points', '');
-      area.setAttribute('points', '');
-      lastTrafficPoints = '';
-    }
+    ['#traffic-polyline', '#traffic-polygon', '#traffic-polyline-tokens', '#traffic-polygon-tokens',
+     '#traffic-polyline-audio', '#traffic-polygon-audio', '#traffic-polyline-duration', '#traffic-polygon-duration'].forEach(sel => {
+      const el = $(sel);
+      if (el) el.setAttribute('points', '');
+    });
+    currentTrafficChartData = null;
     empty.textContent = 'Chưa có request được ghi nhận trong khoảng thời gian này.';
     empty.hidden = false;
     return;
   }
+
   const interval = Number(data.interval_seconds);
-  const pointsByTime = new Map(buckets.map(bucket => [Number(bucket.start), Number(bucket.requests) || 0]));
   const start = Number(data.from);
   const end = Number(data.to);
-  let values;
+  const bucketsMap = new Map(buckets.map(b => [Number(b.start), b]));
+
+  let timePoints = [];
   if (Number.isFinite(interval) && interval > 0 && Number.isFinite(start) && Number.isFinite(end) && end >= start && (end - start) / interval <= 744) {
-    values = [];
-    for (let time = start; time <= end; time += interval) values.push(pointsByTime.get(time) || 0);
+    for (let time = start; time <= end; time += interval) {
+      timePoints.push(bucketsMap.get(time) || { start: time, requests: 0, tokens: 0, audio_sec: 0, duration_ms: 0 });
+    }
   } else {
-    values = buckets.map(bucket => Number(bucket.requests) || 0);
+    timePoints = buckets;
   }
+
   const width = 600;
   const height = 120;
-  const maxValue = Math.max(1, ...values);
-  const points = values.map((value, index) => {
-    const x = values.length === 1 ? width / 2 : index / (values.length - 1) * width;
-    const y = height - 12 - value / maxValue * (height - 24);
-    return `${x.toFixed(2)},${y.toFixed(2)}`;
-  });
-  const geometry = points.join(' ');
-  if (geometry !== lastTrafficPoints) {
-    line.setAttribute('points', geometry);
-    area.setAttribute('points', `0,${height} ${geometry} ${width},${height}`);
-    lastTrafficPoints = geometry;
-  }
+
+  const reqVals = timePoints.map(b => Number(b.requests) || 0);
+  const tokenVals = timePoints.map(b => Number(b.tokens) || 0);
+  const audioVals = timePoints.map(b => Number(b.audio_sec) || 0);
+  const durVals = timePoints.map(b => Number(b.duration_ms) || 0);
+
+  const calcGeom = (values, maxVal) => {
+    const safeMax = Math.max(1, maxVal);
+    const pts = values.map((val, idx) => {
+      const x = values.length === 1 ? width / 2 : idx / (values.length - 1) * width;
+      const y = height - 12 - (val / safeMax) * (height - 24);
+      return { x, y, val };
+    });
+    const geom = pts.map(p => `${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(' ');
+    const areaGeom = `0,${height} ${geom} ${width},${height}`;
+    return { line: geom, area: areaGeom, pts };
+  };
+
+  const gReq = calcGeom(reqVals, Math.max(1, ...reqVals));
+  const gTokens = calcGeom(tokenVals, Math.max(1, ...tokenVals));
+  const gAudio = calcGeom(audioVals, Math.max(1, ...audioVals));
+  const gDur = calcGeom(durVals, Math.max(1, ...durVals));
+
+  $('#traffic-polyline')?.setAttribute('points', gReq.line);
+  $('#traffic-polygon')?.setAttribute('points', gReq.area);
+
+  $('#traffic-polyline-tokens')?.setAttribute('points', gTokens.line);
+  $('#traffic-polygon-tokens')?.setAttribute('points', gTokens.area);
+
+  $('#traffic-polyline-audio')?.setAttribute('points', gAudio.line);
+  $('#traffic-polygon-audio')?.setAttribute('points', gAudio.area);
+
+  $('#traffic-polyline-duration')?.setAttribute('points', gDur.line);
+  $('#traffic-polygon-duration')?.setAttribute('points', gDur.area);
+
+  currentTrafficChartData = {
+    timePoints,
+    reqPts: gReq.pts,
+    tokenPts: gTokens.pts,
+    audioPts: gAudio.pts,
+    durPts: gDur.pts
+  };
+
+  applyTrafficMetricVisibility();
   empty.hidden = true;
 }
 
@@ -712,7 +762,25 @@ async function loadPiperSettings() {
     if (!r.ok) throw new Error(data?.error?.message || 'Không thể đọc cấu hình Piper');
     if ($('#piper-mode-select')) $('#piper-mode-select').value = data.piper_mode || 'auto';
     const voices = data.voices || {};
-    list.innerHTML = Object.keys(voices).sort().map(id => `<label class="settings-row"><span>${esc(id)}</span><input type="checkbox" data-piper-voice="${esc(id)}" ${voices[id] ? 'checked' : ''}></label>`).join('') || '<div class="empty-state">Chưa phát hiện model Piper.</div>';
+    const friendlyName = id => {
+      if (id === 'ngochuyennew' || id === 'ngoc_huyen') return 'Ngọc Huyền (Tiếng Việt)';
+      if (id.includes('female')) return 'Tiếng Thái MMS (Nữ)';
+      if (id.includes('male')) return 'Tiếng Thái MMS (Nam)';
+      return esc(id.replace('piper:', ''));
+    };
+    const voiceKeys = Object.keys(voices).filter(id => id !== 'ngoc_huyen').sort();
+    list.innerHTML = voiceKeys.map(id => `
+      <div class="voice-switch-card">
+        <div class="voice-switch-info">
+          <span class="voice-switch-name">${friendlyName(id)}</span>
+          <span class="voice-switch-tag">${esc(id)}</span>
+        </div>
+        <label class="voice-toggle" title="Bật/tắt giọng đọc">
+          <input type="checkbox" data-piper-voice="${esc(id)}" ${voices[id] ? 'checked' : ''}>
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+    `).join('') || '<div class="empty-state">Chưa phát hiện model Piper.</div>';
   } catch (err) { list.innerHTML = `<div class="empty-state">${esc(err.message)}</div>`; }
 }
 
@@ -1323,6 +1391,10 @@ function renderWorkers(data) {
   $('#start-colab-worker').disabled = !available || !select.value;
   $('#rotate-colab-worker').disabled = !available;
   $('#worker-tiktok-slots').innerHTML = `<div class="worker-item"><strong>${workerCount(data.tiktok_async_slots)}</strong> slot bất đồng bộ</div>`;
+  if ($('#wsum-local')) $('#wsum-local').textContent = local.ready === true ? 'Sẵn sàng' : 'Chưa sẵn sàng';
+  if ($('#wsum-piper')) $('#wsum-piper').textContent = (Array.isArray(data.piper_remote) ? data.piper_remote.length : 0);
+  if ($('#wsum-colab')) $('#wsum-colab').textContent = (Array.isArray(data.colab_workers) ? data.colab_workers.length : 0);
+  if ($('#wsum-tiktok')) $('#wsum-tiktok').textContent = workerCount(data.tiktok_async_slots);
 }
 async function loadWorkers() {
   if (!authReady) return;
@@ -1408,3 +1480,162 @@ $('#rotate-colab-worker')?.addEventListener('click', () => colabCommand('rotate'
 
 initTabs();
 checkAdminAuth();
+
+
+// TRAFFIC CHART INTERACTION (HOVER & LEGEND)
+(function() {
+  const shell = document.getElementById('traffic-chart-shell');
+  const tooltip = document.getElementById('traffic-tooltip');
+  const crosshair = document.getElementById('traffic-crosshair');
+  const dotReq = document.getElementById('traffic-dot-req');
+  const dotTokens = document.getElementById('traffic-dot-tokens');
+  const dotAudio = document.getElementById('traffic-dot-audio');
+  const dotDur = document.getElementById('traffic-dot-duration');
+
+  if (shell && tooltip) {
+    shell.addEventListener('mousemove', e => {
+      if (!currentTrafficChartData || !currentTrafficChartData.timePoints || !currentTrafficChartData.timePoints.length) return;
+      const rect = shell.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      const ratio = Math.max(0, Math.min(1, mouseX / rect.width));
+      const total = currentTrafficChartData.timePoints.length;
+      const idx = Math.min(total - 1, Math.max(0, Math.round(ratio * (total - 1))));
+      const b = currentTrafficChartData.timePoints[idx];
+      if (!b) return;
+
+      const ptX = total === 1 ? 300 : idx / (total - 1) * 600;
+      if (crosshair) {
+        crosshair.setAttribute('x1', ptX.toFixed(2));
+        crosshair.setAttribute('x2', ptX.toFixed(2));
+        crosshair.removeAttribute('hidden');
+      }
+
+      const updateDot = (dot, pts, metric) => {
+        if (!dot) return;
+        if (activeMetrics.has(metric) && pts && pts[idx]) {
+          dot.setAttribute('cx', ptX.toFixed(2));
+          dot.setAttribute('cy', pts[idx].y.toFixed(2));
+          dot.removeAttribute('hidden');
+        } else {
+          dot.setAttribute('hidden', '');
+        }
+      };
+
+      updateDot(dotReq, currentTrafficChartData.reqPts, 'requests');
+      updateDot(dotTokens, currentTrafficChartData.tokenPts, 'tokens');
+      updateDot(dotAudio, currentTrafficChartData.audioPts, 'audio');
+      updateDot(dotDur, currentTrafficChartData.durPts, 'duration');
+
+      const d = new Date(b.start * 1000);
+      const timeStr = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')} - ${d.getDate()}/${d.getMonth()+1}`;
+      const reqVal = Number(b.requests || 0).toLocaleString();
+      const tokenVal = Number(b.tokens || 0).toLocaleString();
+      const audioVal = `${Number(b.audio_sec || 0).toLocaleString()}s`;
+      const durVal = b.requests ? `${Math.round(b.duration_ms / b.requests)}ms` : `${Number(b.duration_ms || 0)}ms`;
+
+      tooltip.innerHTML = `
+        <div class="traffic-tooltip-time">🕒 ${timeStr}</div>
+        <div class="traffic-tooltip-row"><span class="label"><span class="legend-dot dot-req"></span>Requests:</span><strong>${reqVal}</strong></div>
+        <div class="traffic-tooltip-row"><span class="label"><span class="legend-dot dot-tokens"></span>Tokens AI:</span><strong>${tokenVal}</strong></div>
+        <div class="traffic-tooltip-row"><span class="label"><span class="legend-dot dot-audio"></span>Tổng tg Audio:</span><strong>${audioVal}</strong></div>
+        <div class="traffic-tooltip-row"><span class="label"><span class="legend-dot dot-duration"></span>TG xử lý tb:</span><strong>${durVal}</strong></div>
+      `;
+      tooltip.hidden = false;
+
+      let tipLeft = mouseX;
+      if (tipLeft < 90) tipLeft = 90;
+      if (tipLeft > rect.width - 90) tipLeft = rect.width - 90;
+      tooltip.style.left = `${tipLeft}px`;
+      tooltip.style.top = `${Math.max(25, e.clientY - rect.top)}px`;
+    });
+
+    shell.addEventListener('mouseleave', () => {
+      if (crosshair) crosshair.setAttribute('hidden', '');
+      if (dotReq) dotReq.setAttribute('hidden', '');
+      if (dotTokens) dotTokens.setAttribute('hidden', '');
+      if (dotAudio) dotAudio.setAttribute('hidden', '');
+      if (dotDur) dotDur.setAttribute('hidden', '');
+      tooltip.hidden = true;
+    });
+  }
+
+  document.getElementById('traffic-chart-legend')?.addEventListener('click', e => {
+    const btn = e.target.closest('[data-metric]');
+    if (!btn) return;
+    const metric = btn.dataset.metric;
+    if (activeMetrics.has(metric)) {
+      if (activeMetrics.size > 1) {
+        activeMetrics.delete(metric);
+        btn.classList.remove('active');
+      }
+    } else {
+      activeMetrics.add(metric);
+      btn.classList.add('active');
+    }
+    applyTrafficMetricVisibility();
+  });
+})();
+
+// SETTINGS FILTER BAR & ADMIN PASSWORD
+(function() {
+  document.querySelectorAll('.settings-filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.settings-filter-btn').forEach(b => b.classList.toggle('active', b === btn));
+      const filter = btn.dataset.settingsFilter;
+      document.querySelectorAll('[data-settings-section]').forEach(sec => {
+        sec.hidden = (filter !== 'all' && sec.dataset.settingsSection !== filter);
+      });
+    });
+  });
+
+  const changePasswordModal = document.getElementById('change-password-modal');
+  document.getElementById('open-change-password-modal')?.addEventListener('click', () => {
+    document.getElementById('settings-password-form')?.reset();
+    const msg = document.getElementById('settings-pass-msg');
+    if (msg) msg.hidden = true;
+    changePasswordModal?.showModal();
+  });
+  document.getElementById('close-password-modal')?.addEventListener('click', () => changePasswordModal?.close());
+  document.getElementById('cancel-password-modal')?.addEventListener('click', () => changePasswordModal?.close());
+
+  const passForm = document.getElementById('settings-password-form');
+  if (passForm) {
+    passForm.addEventListener('submit', async e => {
+      e.preventDefault();
+      const curr = document.getElementById('settings-curr-pass')?.value || '';
+      const newPass = document.getElementById('settings-new-pass')?.value || '';
+      const confirmPass = document.getElementById('settings-confirm-pass')?.value || '';
+      const msg = document.getElementById('settings-pass-msg');
+      const btn = document.getElementById('settings-pass-btn');
+      if (!msg || !btn) return;
+      if (newPass !== confirmPass) {
+        msg.className = 'settings-pass-msg error';
+        msg.textContent = 'Mật khẩu mới và xác nhận mật khẩu không khớp.';
+        msg.hidden = false;
+        return;
+      }
+      btn.disabled = true;
+      msg.hidden = true;
+      try {
+        const r = await fetchJSON('/admin/api/change-password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ current_password: curr, new_password: newPass })
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d?.error?.message || 'Không thể cập nhật mật khẩu');
+        msg.className = 'settings-pass-msg success';
+        msg.textContent = 'Đã cập nhật mật khẩu Admin thành công!';
+        msg.hidden = false;
+        passForm.reset();
+        setTimeout(() => { changePasswordModal?.close(); }, 1200);
+      } catch (err) {
+        msg.className = 'settings-pass-msg error';
+        msg.textContent = err.message || 'Lỗi khi đổi mật khẩu.';
+        msg.hidden = false;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
+})();
