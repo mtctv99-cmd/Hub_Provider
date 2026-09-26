@@ -36,6 +36,7 @@ func newRouterFull(h *Handler, apiKey string, dbKeys *admin.APIKeys, maxBodyByte
 	mux.HandleFunc("/v1/models", h.ModelsList)
 	mux.HandleFunc("/v1/chat/completions", h.ChatCompletions)
 	mux.HandleFunc("/v1/audio/speech", h.AudioSpeech)
+	mux.HandleFunc("/v1/audio/speech/batch", h.BatchAudioSpeech)
 	mux.HandleFunc("/v1/images/generations", h.Images)
 	mux.HandleFunc("/v1/messages", h.AnthropicMessages)
 	mux.HandleFunc("/v1/videos/generations", h.VideoGenerations)
@@ -277,7 +278,7 @@ func scopeForPath(p string) string {
 		return "models"
 	case p == "/v1/chat/completions", p == "/v1/messages":
 		return "chat"
-	case p == "/v1/audio/speech", strings.HasPrefix(p, "/api/tts/"):
+	case p == "/v1/audio/speech", p == "/v1/audio/speech/batch", strings.HasPrefix(p, "/api/tts/"):
 		return "audio_speech"
 	case p == "/v1/images/generations":
 		return "images"

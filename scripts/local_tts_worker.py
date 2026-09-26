@@ -156,12 +156,20 @@ def main():
     parser.add_argument('--concurrency', type=int, default=20, help='Max worker TTS concurrency (default: 20)')
     parser.add_argument('--threads-per-voice', type=int, default=3, help='Parallel threads per voice lane (default: 3)')
     parser.add_argument('--gpu', action='store_true', help='Use CUDA GPU for Piper and Khmer TTS')
+    parser.add_argument('--device-id', type=int, default=None, help='CUDA device ID (0 for GPU 0, 1 for GPU 1)')
     args = parser.parse_args()
+
+    if args.device_id is not None:
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(args.device_id)
+        os.environ['NVIDIA_VISIBLE_DEVICES'] = str(args.device_id)
 
     logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
     if not args.models_dir.is_dir():
         parser.error(f'models directory missing: {args.models_dir}')
+
+    if args.gpu:
+        LOG.info('CUDA GPU acceleration enabled (device_id: %s)', args.device_id if args.device_id is not None else os.environ.get('CUDA_VISIBLE_DEVICES', '0'))
 
     LOG.info('Loading models into memory (cold start)...')
     t0 = time.monotonic()
