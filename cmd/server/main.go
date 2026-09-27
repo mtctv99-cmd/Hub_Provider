@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -25,10 +26,10 @@ import (
 	"sever_provider/internal/jobstore"
 	"sever_provider/internal/pool"
 	"sever_provider/internal/provider"
-		"sever_provider/internal/provider/colab"
-		"sever_provider/internal/provider/copilot"
-		"sever_provider/internal/provider/deepseek"
-		"sever_provider/internal/provider/gemini"
+	"sever_provider/internal/provider/colab"
+	"sever_provider/internal/provider/copilot"
+	"sever_provider/internal/provider/deepseek"
+	"sever_provider/internal/provider/gemini"
 	"sever_provider/internal/provider/piper"
 	"sever_provider/internal/provider/tiktok"
 	"sever_provider/internal/scheduler"
@@ -64,15 +65,15 @@ func main() {
 	registry.Register(tiktok.New(nil, tiktokPool))
 	geminiAdapter := gemini.New(nil)
 	registry.Register(geminiAdapter)
-		registry.Register(copilot.New(nil))
-		registry.Register(colab.New(colab.Config{URL: os.Getenv("COLAB_WS_URL"), WorkerID: os.Getenv("COLAB_WORKER_ID"), APIKey: os.Getenv("COLAB_API_KEY")}))
-		registry.Register(deepseek.New(nil))
+	registry.Register(copilot.New(nil))
+	registry.Register(colab.New(colab.Config{URL: os.Getenv("COLAB_WS_URL"), WorkerID: os.Getenv("COLAB_WORKER_ID"), APIKey: os.Getenv("COLAB_API_KEY")}))
+	registry.Register(deepseek.New(nil))
 
-		masterKey := os.Getenv("MASTER_KEY")
-		if masterKey == "" {
-			masterKey = cfg.Server.MasterKey
-		}
-		secretStore, err := secret.NewStore(masterKey)
+	masterKey := os.Getenv("MASTER_KEY")
+	if masterKey == "" {
+		masterKey = cfg.Server.MasterKey
+	}
+	secretStore, err := secret.NewStore(masterKey)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "secret store init failed: %v\n", err)
 		return
@@ -171,6 +172,68 @@ func main() {
 		return err
 	})
 	handler.SetBrowserManager(browserMgr)
+	// ponytail: sequential profile refresh. Upgrade to worker pool if profile count > 20.
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-reclaimCtx.Done():
+				return
+			case <-ticker.C:
+				details, err := identityManager.ListIdentityDetails(context.Background(), "google")
+				if err != nil {
+					log.Printf("[AutoRefresh] list google identities failed: %v", err)
+					continue
+				}
+				for _, detail := range details {
+					for _, cred := range detail.Credentials {
+						if cred == nil || cred.Domain != "gemini_web" {
+							continue
+						}
+						const prefix = "browser_profile:"
+						if !strings.HasPrefix(cred.SourceRef, prefix) {
+							continue
+						}
+						profileID := strings.TrimPrefix(cred.SourceRef, prefix)
+						if profileID == "" {
+							continue
+						}
+						cookieStr, err := browserMgr.RefreshAccountFromProfile(profileID)
+						if err != nil {
+							log.Printf("[AutoRefresh] refresh profile %s failed: %v", profileID, err)
+							continue
+						}
+						secretBytes, err := json.Marshal(map[string]string{"cookie": cookieStr})
+						if err != nil {
+							log.Printf("[AutoRefresh] marshal secret for %s failed: %v", profileID, err)
+							continue
+						}
+						priority := detail.Identity.Priority
+						if priority <= 0 {
+							priority = 1
+						}
+						maxConcurrency := cred.MaxConcurrency
+						if maxConcurrency <= 0 {
+							maxConcurrency = 4
+						}
+						specs := []identity.GoogleCredentialSpec{{
+							Domain:         "gemini_web",
+							ID:             cred.ID,
+							MaxConcurrency: maxConcurrency,
+							PoolRole:       cred.PoolRole,
+							SourceRef:      cred.SourceRef,
+							Fingerprint:    cred.Fingerprint,
+							Secret:         secretBytes,
+						}}
+						if _, err := identityManager.UpsertGoogleAccount(context.Background(), detail.Identity.Email, priority, specs); err != nil {
+							log.Printf("[AutoRefresh] upsert google account %s failed: %v", detail.Identity.Email, err)
+						}
+					}
+				}
+			}
+		}
+	}()
 	colabSupervisor.Start(reclaimCtx)
 	handler.SetSessions(sessions)
 	tiktokConcurrency := 4

@@ -1,0 +1,14 @@
+[Unit]
+Description=Copilot Token Auto Refresh Service
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/media/reup/Data_sv4/Sever_provider
+ExecStart=/bin/bash /media/reup/Data_sv4/Sever_provider/scripts/auto_copilot_refresh.sh --once
+User=reup
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
