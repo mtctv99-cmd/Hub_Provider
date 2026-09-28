@@ -458,14 +458,79 @@ def connect_loop(server, token, worker_id, worker, lane, stop, retry=3):
                 sock.close()
 
 
+def ensure_tts_models(models_dir: Path, base_url: str):
+    """Download required TTS ONNX and config assets if missing."""
+    models_dir = Path(models_dir)
+    models_dir.mkdir(parents=True, exist_ok=True)
+    nh_dir = models_dir / 'ngoc_huyen'
+    nh_dir.mkdir(parents=True, exist_ok=True)
+
+    nh_onnx = nh_dir / 'ngochuyennew.onnx' if (nh_dir / 'ngochuyennew.onnx').is_file() else models_dir / 'ngochuyennew.onnx'
+    nh_json = nh_dir / 'ngochuyennew.onnx.json' if (nh_dir / 'ngochuyennew.onnx.json').is_file() else models_dir / 'ngochuyennew.onnx.json'
+
+    specs = {
+        'ngochuyennew': {
+            'onnx': (nh_onnx, f"{base_url}/models/ngoc_huyen/ngochuyennew.onnx"),
+            'json': (nh_json, f"{base_url}/models/ngoc_huyen/ngochuyennew.onnx.json")
+        },
+        'th_TH-mms_female-medium': {
+            'onnx': (models_dir / 'th_TH-mms_female-medium.onnx', f"{base_url}/models/th_TH-mms_female-medium.onnx"),
+            'json': (models_dir / 'th_TH-mms_female-medium.onnx.json', f"{base_url}/models/th_TH-mms_female-medium.onnx.json")
+        },
+        'khmer_tts_v3': {
+            'onnx': (models_dir / 'khmer_tts_v3.onnx', f"{base_url}/models/khmer_tts_v3.onnx"),
+            'json': (models_dir / 'khmer_tts_v3.json', f"{base_url}/models/khmer_tts_v3.json")
+        }
+    }
+
+    import urllib.request
+    for name, files in specs.items():
+        for kind, (path, url) in files.items():
+            if not path.is_file() or path.stat().st_size == 0:
+                LOG.info("Fetching [%s] %s -> %s", name, url, path.name)
+                try:
+                    req = urllib.request.Request(
+                        url,
+                        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+                    )
+                    with urllib.request.urlopen(req, timeout=120) as resp, open(path, "wb") as out_f:
+                        while True:
+                            chunk = resp.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            out_f.write(chunk)
+                    LOG.info("Saved %s (%d bytes)", path.name, path.stat().st_size)
+                except Exception as exc:
+                    LOG.warning("Failed to download %s: %s", url, exc)
+
+
+def ensure_gguf_model(gguf_path: Path, repo_id: str, filename: str) -> Path:
+    """Download GGUF model from HuggingFace if missing."""
+    gguf_path = Path(gguf_path)
+    if gguf_path.is_file() and gguf_path.stat().st_size > 0:
+        return gguf_path
+    LOG.info("GGUF model not found locally at %s. Downloading %s/%s from HuggingFace...", gguf_path, repo_id, filename)
+    try:
+        from huggingface_hub import hf_hub_download
+        downloaded = hf_hub_download(repo_id=repo_id, filename=filename)
+        return Path(downloaded)
+    except Exception as exc:
+        LOG.warning("huggingface_hub download failed: %s; keeping path %s", exc, gguf_path)
+        return gguf_path
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--server', required=True, help='WorkerHub websocket URL')
     parser.add_argument('--worker-id', default='colab-combined')
+    parser.add_argument('--token', default=os.environ.get('WORKER_TOKEN', 'omni-secret-key-123'), help='Worker authentication token')
     parser.add_argument('--model-id', help='Must match a google_colab chat model in --config; auto-selected only when exactly one exists')
     parser.add_argument('--config', type=Path, default=Path('config/models.yaml'))
-    parser.add_argument('--gguf', type=Path, required=True)
-    parser.add_argument('--models-dir', type=Path, required=True, help='Must contain ngochuyennew and th_TH-mms_female-medium ONNX plus Khmer ONNX/config')
+    parser.add_argument('--gguf', type=Path, default=Path('models/gemma-4-E2B-it-ultra-uncensored-heretic-Q4_K_M.gguf'))
+    parser.add_argument('--repo-id', default='llmfan46/gemma-4-E2B-it-ultra-uncensored-heretic-GGUF', help='HuggingFace repo for GGUF model')
+    parser.add_argument('--filename', default='gemma-4-E2B-it-ultra-uncensored-heretic-Q4_K_M.gguf', help='HuggingFace GGUF filename')
+    parser.add_argument('--models-dir', type=Path, default=Path('models'), help='Directory for TTS ONNX models')
+    parser.add_argument('--download-url', default='https://hub.maika.sbs', help='Base HTTP URL to download TTS models from')
     parser.add_argument('--khmer-onnx', type=Path, help='Optional explicit Khmer ONNX path; otherwise resolved under --models-dir')
     parser.add_argument('--khmer-config', type=Path, help='Optional explicit khmer_tts_v3.json path')
     parser.add_argument('--asset-manifest', type=Path, help='Optional JSON map of asset keys to path and expected SHA-256')
@@ -479,9 +544,9 @@ def main(argv=None):
     parser.add_argument('--tts-gpu', action='store_true', help='Use CUDA GPU for Piper and Khmer TTS models')
     parser.add_argument('--queue-size', type=int, default=32, help='Internal job queue size per voice (default: 32)')
     args = parser.parse_args(argv)
-    token = os.environ.get('WORKER_TOKEN', '')
+    token = args.token or os.environ.get('WORKER_TOKEN', 'omni-secret-key-123')
     if not token:
-        parser.error('WORKER_TOKEN environment variable required')
+        parser.error('WORKER_TOKEN environment variable or --token required')
     if args.queue_size < 1 or args.khmer_sample_rate < 1:
         parser.error('queue-size and khmer-sample-rate must be positive')
     if not args.config.is_file():
@@ -491,6 +556,13 @@ def main(argv=None):
         _, configured_tts = configured_models(args.config)
     except Exception as exc:
         parser.error(str(exc))
+
+    # Auto-download assets if missing
+    if args.download_url:
+        ensure_tts_models(args.models_dir, args.download_url)
+    if args.repo_id and args.filename:
+        args.gguf = ensure_gguf_model(args.gguf, args.repo_id, args.filename)
+
     if not args.gguf.is_file():
         parser.error(f'LLM GGUF file missing: {args.gguf}')
     if not args.models_dir.is_dir():
