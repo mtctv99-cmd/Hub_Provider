@@ -41,27 +41,27 @@ models:
     guest: true
   gpt-5.6:
     provider: copilot_ws
-    capabilities: [chat, streaming]
+    capabilities: [chat, streaming, vision]
     timeout_sec: 90
   gpt-5.6-reasoner:
     provider: copilot_ws
-    capabilities: [chat, streaming, reasoning]
+    capabilities: [chat, streaming, reasoning, vision]
     timeout_sec: 180
   copilot-chat:
     provider: copilot_ws
-    capabilities: [chat, streaming]
+    capabilities: [chat, streaming, vision]
     timeout_sec: 90
   copilot-creative:
     provider: copilot_ws
-    capabilities: [chat, streaming]
+    capabilities: [chat, streaming, vision]
     timeout_sec: 90
   copilot-precise:
     provider: copilot_ws
-    capabilities: [chat, streaming]
+    capabilities: [chat, streaming, vision]
     timeout_sec: 90
   copilot-balanced:
     provider: copilot_ws
-    capabilities: [chat, streaming]
+    capabilities: [chat, streaming, vision]
     timeout_sec: 90
   dall-e-3:
     provider: copilot_ws

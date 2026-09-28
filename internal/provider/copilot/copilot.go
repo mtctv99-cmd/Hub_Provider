@@ -3,9 +3,11 @@ package copilot
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -161,6 +163,7 @@ func (a *Adapter) Capabilities() []provider.Capability {
 		provider.CapabilityStreaming,
 		provider.CapabilityImage,
 		provider.CapabilityReasoning,
+		provider.CapabilityVision,
 	}
 }
 func (a *Adapter) Speech(context.Context, provider.SpeechRequest, []byte) ([]byte, string, error) {
@@ -223,7 +226,8 @@ func (a *Adapter) Chat(ctx context.Context, req provider.ChatRequest, credential
 	}
 	sess := sessionFromUpstream(req.Upstream)
 	prompt := provider.FormatPromptWithTools(req.Messages, req.Tools, req.ToolChoice)
-	full, err := a.generate(ctx, account, &sess, prompt, req.Model, nil)
+	imageDataURI := extractImageDataURI(ctx, req.Messages)
+	full, err := a.generate(ctx, account, &sess, prompt, req.Model, imageDataURI, nil)
 	if err != nil {
 		return provider.ChatResponse{}, err
 	}
@@ -256,13 +260,14 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, cred
 	}
 	sess := sessionFromUpstream(req.Upstream)
 	prompt := provider.FormatPromptWithTools(req.Messages, req.Tools, req.ToolChoice)
+	imageDataURI := extractImageDataURI(ctx, req.Messages)
 	out := make(chan provider.StreamChunk, 16)
 	hasTools := len(req.Tools) > 0 && req.ToolChoice != "none"
 
 	go func() {
 		defer close(out)
 		if !hasTools {
-			_, err := a.generate(ctx, account, &sess, prompt, req.Model, func(delta string) {
+			_, err := a.generate(ctx, account, &sess, prompt, req.Model, imageDataURI, func(delta string) {
 				select {
 				case out <- provider.StreamChunk{Content: delta}:
 				case <-ctx.Done():
@@ -278,7 +283,7 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, cred
 
 		// Tool calling mode: buffer stream to parse tool call blocks cleanly
 		var buf strings.Builder
-		_, err := a.generate(ctx, account, &sess, prompt, req.Model, func(delta string) {
+		_, err := a.generate(ctx, account, &sess, prompt, req.Model, imageDataURI, func(delta string) {
 			buf.WriteString(delta)
 		})
 		if err != nil {
@@ -312,7 +317,53 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, cred
 	return out, nil
 }
 
-func (a *Adapter) generate(ctx context.Context, account Account, sess *Session, text, model string, onDelta func(string)) (string, error) {
+func extractImageDataURI(ctx context.Context, messages []provider.Message) string {
+	for _, m := range messages {
+		for _, p := range m.Parts {
+			if p.Type == "image_url" && p.ImageURL != nil && p.ImageURL.URL != "" {
+				raw := strings.TrimSpace(p.ImageURL.URL)
+				if strings.HasPrefix(raw, "data:image/") {
+					return raw
+				}
+				if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
+					dataURI, err := fetchImageAsDataURI(ctx, raw)
+					if err == nil && dataURI != "" {
+						return dataURI
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func fetchImageAsDataURI(ctx context.Context, rawURL string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return "", err
+	}
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("fetch image HTTP %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 16*1024*1024))
+	if err != nil || len(data) == 0 {
+		return "", fmt.Errorf("read image bytes failed: %w", err)
+	}
+	mime := resp.Header.Get("Content-Type")
+	if mime == "" || !strings.HasPrefix(mime, "image/") {
+		mime = http.DetectContentType(data)
+	}
+	b64 := base64.StdEncoding.EncodeToString(data)
+	return fmt.Sprintf("data:%s;base64,%s", mime, b64), nil
+}
+
+func (a *Adapter) generate(ctx context.Context, account Account, sess *Session, text, model, imageDataURI string, onDelta func(string)) (string, error) {
 	wsURL, convID, chatID, err := BuildInvocationURL(account.TokenURL, sess)
 	if err != nil {
 		return "", err
@@ -350,6 +401,10 @@ func (a *Adapter) generate(ctx context.Context, account Account, sess *Session, 
 	if message, ok := arg0["message"].(map[string]any); ok {
 		message["text"] = text
 		message["requestId"] = reqID
+		if imageDataURI != "" {
+			message["imageUrl"] = imageDataURI
+			message["originalImageUrl"] = imageDataURI
+		}
 	}
 
 	data, _ := json.Marshal(payload)
