@@ -49,6 +49,13 @@ func NewModelRegistry() *ModelRegistry {
 	_ = r.Register(ModelSpec{ID: "deepseek-v4.1-flash", Provider: "deepseek_web", Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming}, TimeoutSec: 120})
 	_ = r.Register(ModelSpec{ID: "deepseek-v4-flash", Provider: "deepseek_web", Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming}, TimeoutSec: 120})
 	_ = r.Register(ModelSpec{ID: "deepseek-v4-pro", Provider: "deepseek_web", Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming, provider.CapabilityReasoning}, TimeoutSec: 180})
+	_ = r.Register(ModelSpec{ID: "gpt-5.6", Provider: "copilot_ws", Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming}, TimeoutSec: 90})
+	_ = r.Register(ModelSpec{ID: "gpt-5.6-reasoner", Provider: "copilot_ws", Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming, provider.CapabilityReasoning}, TimeoutSec: 180})
+	_ = r.Register(ModelSpec{ID: "copilot-chat", Provider: "copilot_ws", Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming}, TimeoutSec: 90})
+	_ = r.Register(ModelSpec{ID: "copilot-creative", Provider: "copilot_ws", Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming}, TimeoutSec: 90})
+	_ = r.Register(ModelSpec{ID: "copilot-precise", Provider: "copilot_ws", Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming}, TimeoutSec: 90})
+	_ = r.Register(ModelSpec{ID: "copilot-balanced", Provider: "copilot_ws", Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming}, TimeoutSec: 90})
+	_ = r.Register(ModelSpec{ID: "dall-e-3", Provider: "copilot_ws", Capabilities: []provider.Capability{provider.CapabilityImage}, TimeoutSec: 120})
 	return r
 }
 func (r *ModelRegistry) Register(spec ModelSpec) error {

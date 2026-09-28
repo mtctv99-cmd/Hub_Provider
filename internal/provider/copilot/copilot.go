@@ -156,7 +156,12 @@ func DefaultTemplate() map[string]any {
 }
 func (a *Adapter) Name() string { return "copilot_ws" }
 func (a *Adapter) Capabilities() []provider.Capability {
-	return []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming, provider.CapabilityImage}
+	return []provider.Capability{
+		provider.CapabilityChat,
+		provider.CapabilityStreaming,
+		provider.CapabilityImage,
+		provider.CapabilityReasoning,
+	}
 }
 func (a *Adapter) Speech(context.Context, provider.SpeechRequest, []byte) ([]byte, string, error) {
 	return nil, "", provider.ErrCapabilityUnsupported
@@ -217,12 +222,28 @@ func (a *Adapter) Chat(ctx context.Context, req provider.ChatRequest, credential
 		return provider.ChatResponse{}, errors.New("copilot token is expired or invalid")
 	}
 	sess := sessionFromUpstream(req.Upstream)
-	text := formatMessages(req.Messages)
-	full, err := a.generate(ctx, account, &sess, text, req.Model, nil)
+	prompt := provider.FormatPromptWithTools(req.Messages, req.Tools, req.ToolChoice)
+	full, err := a.generate(ctx, account, &sess, prompt, req.Model, nil)
 	if err != nil {
 		return provider.ChatResponse{}, err
 	}
-	return provider.ChatResponse{ID: "copilot-" + randomHex(8), Model: req.Model, Content: full, Upstream: upstreamFromSession(sess)}, nil
+	cleanContent := full
+	var toolCalls []provider.ToolCall
+	finishReason := "stop"
+	if len(req.Tools) > 0 && req.ToolChoice != "none" {
+		cleanContent, toolCalls = provider.ParseToolCalls(full)
+		if len(toolCalls) > 0 {
+			finishReason = "tool_calls"
+		}
+	}
+	return provider.ChatResponse{
+		ID:           "copilot-" + randomHex(8),
+		Model:        req.Model,
+		Content:      cleanContent,
+		ToolCalls:    toolCalls,
+		FinishReason: finishReason,
+		Upstream:     upstreamFromSession(sess),
+	}, nil
 }
 
 func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, credentialSecret []byte) (<-chan provider.StreamChunk, error) {
@@ -234,21 +255,59 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, cred
 		return nil, errors.New("copilot token is expired or invalid")
 	}
 	sess := sessionFromUpstream(req.Upstream)
-	text := formatMessages(req.Messages)
+	prompt := provider.FormatPromptWithTools(req.Messages, req.Tools, req.ToolChoice)
 	out := make(chan provider.StreamChunk, 16)
+	hasTools := len(req.Tools) > 0 && req.ToolChoice != "none"
+
 	go func() {
 		defer close(out)
-		_, err := a.generate(ctx, account, &sess, text, req.Model, func(delta string) {
-			select {
-			case out <- provider.StreamChunk{Content: delta}:
-			case <-ctx.Done():
+		if !hasTools {
+			_, err := a.generate(ctx, account, &sess, prompt, req.Model, func(delta string) {
+				select {
+				case out <- provider.StreamChunk{Content: delta}:
+				case <-ctx.Done():
+				}
+			})
+			if err != nil {
+				out <- provider.StreamChunk{Err: err}
+				return
 			}
+			out <- provider.StreamChunk{Done: true, FinishReason: "stop", Upstream: upstreamFromSession(sess)}
+			return
+		}
+
+		// Tool calling mode: buffer stream to parse tool call blocks cleanly
+		var buf strings.Builder
+		_, err := a.generate(ctx, account, &sess, prompt, req.Model, func(delta string) {
+			buf.WriteString(delta)
 		})
 		if err != nil {
 			out <- provider.StreamChunk{Err: err}
 			return
 		}
-		out <- provider.StreamChunk{Done: true, Upstream: upstreamFromSession(sess)}
+		fullText := buf.String()
+		cleanText, toolCalls := provider.ParseToolCalls(fullText)
+		finishReason := "stop"
+		if len(toolCalls) > 0 {
+			finishReason = "tool_calls"
+		}
+		if cleanText != "" {
+			select {
+			case out <- provider.StreamChunk{Content: cleanText}:
+			case <-ctx.Done():
+				return
+			}
+		}
+		select {
+		case out <- provider.StreamChunk{
+			Done:         true,
+			ToolCalls:    toolCalls,
+			FinishReason: finishReason,
+			Upstream:     upstreamFromSession(sess),
+		}:
+		case <-ctx.Done():
+			return
+		}
 	}()
 	return out, nil
 }
@@ -499,8 +558,18 @@ func upstreamFromSession(sess Session) provider.UpstreamState {
 	return provider.UpstreamState{ConversationID: sess.ConversationID, ChatSessionID: sess.ChatSessionID, InvocationID: sess.InvocationID}
 }
 func mapTone(model string) string {
-	if strings.Contains(strings.ToLower(model), "think") {
+	m := strings.ToLower(model)
+	if strings.Contains(m, "think") || strings.Contains(m, "reason") {
 		return "Gpt_5_6_Reasoning"
+	}
+	if strings.Contains(m, "creative") {
+		return "Creative"
+	}
+	if strings.Contains(m, "precise") {
+		return "Precise"
+	}
+	if strings.Contains(m, "balanced") {
+		return "Balanced"
 	}
 	return "Gpt_5_6_Chat"
 }
