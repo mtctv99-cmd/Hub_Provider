@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -389,89 +388,10 @@ func (a *Adapter) ValidateCookie(ctx context.Context, cookie string) error {
 		return nil
 	}
 
-var toolCallPattern = regexp.MustCompile("(?s)```(?:tool_call|json)?\\s*\\n?(\\{\\s*\"name\"\\s*:\\s*\"[^\"]+\"\\s*,\\s*\"arguments\"\\s*:.*?\\})\\s*\\n?```")
-
 func ParseToolCalls(text string) (string, []provider.ToolCall) {
-	var calls []provider.ToolCall
-	matches := toolCallPattern.FindAllStringSubmatch(text, -1)
-	for i, match := range matches {
-		if len(match) > 1 {
-			var data struct {
-				Name      string         `json:"name"`
-				Arguments map[string]any `json:"arguments"`
-			}
-			if err := json.Unmarshal([]byte(strings.TrimSpace(match[1])), &data); err == nil && data.Name != "" {
-				argsJSON, _ := json.Marshal(data.Arguments)
-				calls = append(calls, provider.ToolCall{
-					ID:   fmt.Sprintf("call_%d_%s", i, data.Name),
-					Type: "function",
-					Function: provider.FunctionCallDesc{
-						Name:      data.Name,
-						Arguments: string(argsJSON),
-					},
-				})
-			}
-		}
-	}
-	cleaned := toolCallPattern.ReplaceAllString(text, "")
-	return strings.TrimSpace(cleaned), calls
+	return provider.ParseToolCalls(text)
 }
 
 func formatPromptWithTools(messages []provider.Message, tools []provider.Tool, toolChoice any) string {
-	var parts []string
-
-	if len(tools) > 0 && toolChoice != "none" {
-		var toolDefs []map[string]any
-		for _, t := range tools {
-			if t.Type == "function" && t.Function != nil {
-				toolDefs = append(toolDefs, map[string]any{
-					"name":        t.Function.Name,
-					"description": t.Function.Description,
-					"parameters":  t.Function.Parameters,
-				})
-			}
-		}
-		if len(toolDefs) > 0 {
-			b, _ := json.MarshalIndent(toolDefs, "", "  ")
-			toolIntro := "# Tool Use\n\nYou can call the following tools. Use this JSON format for a single tool call:\n```tool_call\n{\"name\": \"func_name\", \"arguments\": {...}}\n```\n\nFor multiple simultaneous calls, output several blocks one after another. When calling tools, output ONLY the ```tool_call blocks.\n\nAvailable tools:\n"
-			parts = append(parts, toolIntro+string(b))
-		}
-	}
-
-	for _, m := range messages {
-		role := strings.ToLower(strings.TrimSpace(m.Role))
-		content := m.TextContent()
-
-		toolCallBlocks := ""
-		if role == "assistant" && len(m.ToolCalls) > 0 {
-			for _, tc := range m.ToolCalls {
-				toolCallBlocks += fmt.Sprintf("```tool_call\n{\"name\": %q, \"arguments\": %s}\n```\n", tc.Function.Name, tc.Function.Arguments)
-			}
-		}
-
-		switch role {
-		case "system":
-			parts = append(parts, fmt.Sprintf("[System instruction]: %s", content))
-		case "assistant":
-			line := fmt.Sprintf("[Assistant]: %s", content)
-			if toolCallBlocks != "" {
-				if strings.TrimSpace(content) == "" {
-					line = "[Assistant]: " + strings.TrimSpace(toolCallBlocks)
-				} else {
-					line = "[Assistant]: " + strings.TrimSpace(content) + "\n\n" + strings.TrimSpace(toolCallBlocks)
-				}
-			}
-			parts = append(parts, line)
-		case "tool":
-			toolName := m.Name
-			if toolName == "" {
-				toolName = m.ToolCallID
-			}
-			parts = append(parts, fmt.Sprintf("[Tool result from %s]: %s", toolName, content))
-		default:
-			parts = append(parts, content)
-		}
-	}
-
-	return strings.Join(parts, "\n\n")
+	return provider.FormatPromptWithTools(messages, tools, toolChoice)
 }

@@ -215,33 +215,6 @@ func isSearchModel(model string) bool {
 	return strings.Contains(m, "search")
 }
 
-func formatMessages(messages []provider.Message) string {
-	if len(messages) == 0 {
-		return ""
-	}
-	if len(messages) == 1 {
-		return messages[0].TextContent()
-	}
-	var b strings.Builder
-	for i, m := range messages {
-		text := m.TextContent()
-		if text == "" {
-			continue
-		}
-		if i > 0 {
-			b.WriteString("\n\n")
-		}
-		role := strings.Title(strings.ToLower(m.Role))
-		if role == "" {
-			role = "User"
-		}
-		b.WriteString(role)
-		b.WriteString(": ")
-		b.WriteString(text)
-	}
-	return b.String()
-}
-
 // Chat gọi chat completion dạng non-streaming.
 func (a *Adapter) Chat(ctx context.Context, req provider.ChatRequest, credentialSecret []byte) (provider.ChatResponse, error) {
 	if !a.Breaker.Allow(time.Now()) {
@@ -261,7 +234,7 @@ func (a *Adapter) Chat(ctx context.Context, req provider.ChatRequest, credential
 		sessionID = credSessionID
 	}
 
-	prompt := formatMessages(req.Messages)
+	prompt := provider.FormatPromptWithTools(req.Messages, req.Tools, req.ToolChoice)
 	thinkingEnabled := isReasonerModel(req.Model)
 	searchEnabled := isSearchModel(req.Model)
 
@@ -296,12 +269,25 @@ func (a *Adapter) Chat(ctx context.Context, req provider.ChatRequest, credential
 
 	a.Breaker.RecordSuccess()
 
+	fullContent := contentBuilder.String()
+	cleanContent := fullContent
+	var toolCalls []provider.ToolCall
+	finishReason := "stop"
+
+	if len(req.Tools) > 0 && req.ToolChoice != "none" {
+		cleanContent, toolCalls = provider.ParseToolCalls(fullContent)
+		if len(toolCalls) > 0 {
+			finishReason = "tool_calls"
+		}
+	}
+
 	return provider.ChatResponse{
 		ID:               "deepseek-" + strconv.FormatInt(time.Now().UnixNano(), 10),
 		Model:            req.Model,
-		Content:          contentBuilder.String(),
+		Content:          cleanContent,
 		ReasoningContent: reasoningBuilder.String(),
-		FinishReason:     "stop",
+		ToolCalls:        toolCalls,
+		FinishReason:     finishReason,
 		Upstream:         provider.UpstreamState{ChatSessionID: chatSessionID},
 	}, nil
 }
@@ -325,7 +311,7 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, cred
 		sessionID = credSessionID
 	}
 
-	prompt := formatMessages(req.Messages)
+	prompt := provider.FormatPromptWithTools(req.Messages, req.Tools, req.ToolChoice)
 	thinkingEnabled := isReasonerModel(req.Model)
 	searchEnabled := isSearchModel(req.Model)
 
@@ -348,19 +334,89 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, cred
 		defer close(out)
 
 		hasError := false
+		hasTools := len(req.Tools) > 0 && req.ToolChoice != "none"
+
+		if !hasTools {
+			for chunk := range stream {
+				if chunk.Err != nil {
+					hasError = true
+					a.Breaker.RecordFailure(chunk.Err)
+				}
+				select {
+				case out <- chunk:
+				case <-ctx.Done():
+					return
+				}
+			}
+			if !hasError {
+				a.Breaker.RecordSuccess()
+			}
+			return
+		}
+
+		// Chế độ Tool Calling:
+		// Stream reasoning chunks trực tiếp. Buffer text content để parse tool calls sạch sẽ.
+		var contentBuf strings.Builder
 		for chunk := range stream {
 			if chunk.Err != nil {
 				hasError = true
 				a.Breaker.RecordFailure(chunk.Err)
+				select {
+				case out <- chunk:
+				case <-ctx.Done():
+					return
+				}
+				return
 			}
+
+			if chunk.ReasoningContent != "" {
+				select {
+				case out <- provider.StreamChunk{
+					ReasoningContent: chunk.ReasoningContent,
+					Upstream:         chunk.Upstream,
+				}:
+				case <-ctx.Done():
+					return
+				}
+			}
+
+			if chunk.Content != "" {
+				contentBuf.WriteString(chunk.Content)
+			}
+		}
+
+		if !hasError {
+			a.Breaker.RecordSuccess()
+		}
+
+		fullText := contentBuf.String()
+		cleanText, toolCalls := provider.ParseToolCalls(fullText)
+
+		finishReason := "stop"
+		if len(toolCalls) > 0 {
+			finishReason = "tool_calls"
+		}
+
+		if cleanText != "" {
 			select {
-			case out <- chunk:
+			case out <- provider.StreamChunk{
+				Content:  cleanText,
+				Upstream: provider.UpstreamState{ChatSessionID: chatSessionID},
+			}:
 			case <-ctx.Done():
 				return
 			}
 		}
-		if !hasError {
-			a.Breaker.RecordSuccess()
+
+		select {
+		case out <- provider.StreamChunk{
+			Done:         true,
+			ToolCalls:    toolCalls,
+			FinishReason: finishReason,
+			Upstream:     provider.UpstreamState{ChatSessionID: chatSessionID},
+		}:
+		case <-ctx.Done():
+			return
 		}
 	}()
 
