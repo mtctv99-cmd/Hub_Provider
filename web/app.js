@@ -1013,28 +1013,37 @@ $('#add-tiktok-form')?.addEventListener('submit', async event => {
 	  }
 	}
 
-	$('#add-deepseek-account')?.addEventListener('click', async () => {
-	  const button = $('#add-deepseek-account');
-	  if (button) button.disabled = true;
+	// DeepSeek manual token save handler: user copies userToken from
+	// chat.deepseek.com localStorage after logging in on their own device,
+	// then pastes it into #deepseek-token-input and clicks save.
+	$('#save-deepseek-token')?.addEventListener('click', async () => {
+	  const input = $('#deepseek-token-input');
+	  const token = (input?.value || '').trim();
+	  if (!token || token.length < 20) {
+	    showDeepSeekBrowserStatus('Token DeepSeek không hợp lệ (tối thiểu 20 ký tự).', 'error');
+	    return;
+	  }
+	  const accountID = 'deepseek-main';
+	  const saveButton = $('#save-deepseek-token');
+	  if (saveButton) saveButton.disabled = true;
 	  try {
-	    const r = await fetchJSON('/admin/api/deepseek/auto-login', {
+	    const r = await fetchJSON('/admin/api/deepseek/accounts', {
 	      method: 'POST',
 	      headers: {'Content-Type': 'application/json'},
-	      body: '{}'
+	      body: JSON.stringify({email: 'deepseek@maika.sbs', identity_id: accountID, token: token, max_concurrency: 4})
 	    });
 	    const data = await r.json().catch(() => ({}));
 	    if (!r.ok) {
-	      showDeepSeekBrowserStatus(data?.error?.message || 'Không thể mở browser DeepSeek trên server.', 'error');
+	      showDeepSeekBrowserStatus(data?.error?.message || 'Không thể lưu token DeepSeek.', 'error');
 	      return;
 	    }
-	    showDeepSeekBrowserStatus('Đã mở browser DeepSeek. Hãy đăng nhập tài khoản trên cửa sổ trình duyệt; hệ thống sẽ tự lưu phiên và đóng trình duyệt khi hoàn tất.', 'info');
-	    stopDeepSeekLoginPoll();
-	    deepseekLoginPoll = setInterval(pollDeepSeekLoginStatus, 2000);
-	    await pollDeepSeekLoginStatus();
+	    if (input) input.value = '';
+	    showDeepSeekBrowserStatus('Đã lưu token DeepSeek, tài khoản đang hoạt động (HEALTHY).', 'success');
+	    await loadDeepSeekAccounts();
 	  } catch (err) {
-	    showDeepSeekBrowserStatus(err.message || 'Không thể mở browser DeepSeek.', 'error');
+	    showDeepSeekBrowserStatus(err.message || 'Không thể lưu token DeepSeek.', 'error');
 	  } finally {
-	    if (button) button.disabled = false;
+	    if (saveButton) saveButton.disabled = false;
 	  }
 	});
 

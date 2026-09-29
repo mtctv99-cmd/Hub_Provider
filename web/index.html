@@ -271,7 +271,8 @@
 
       <section class="provider-panel" data-provider-section="deepseek">
         <div class="provider-actions-row">
-          <button class="btn" id="add-deepseek-account">+ Thêm tài khoản DeepSeek</button>
+          <input id="deepseek-token-input" type="password" autocomplete="off" spellcheck="false" placeholder="Dán userToken DeepSeek (localStorage)" style="flex:1;min-width:280px;padding:8px 12px;border:1px solid #e2e8f0;border-radius:8px">
+          <button class="btn" id="save-deepseek-token">💾 Lưu Token</button>
         </div>
         <div id="deepseek-browser-status" class="browser-flow-status" role="status" hidden></div>
         <div id="deepseek-account-list" class="account-grid" aria-live="polite"><div class="empty-state">Đang tải danh sách tài khoản DeepSeek…</div></div>

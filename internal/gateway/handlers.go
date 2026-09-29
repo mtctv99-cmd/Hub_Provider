@@ -150,35 +150,31 @@ func (h *Handler) ModelsList(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-		type item struct {
-			ID        string `json:"id"`
-			Object    string `json:"object"`
-			Created   int64  `json:"created"`
-			OwnedBy   string `json:"owned_by"`
-			Available bool   `json:"available,omitempty"`
+	type item struct {
+		ID        string `json:"id"`
+		Object    string `json:"object"`
+		Created   int64  `json:"created"`
+		OwnedBy   string `json:"owned_by"`
+		Available bool   `json:"available,omitempty"`
+	}
+	items := make([]item, 0)
+	for _, spec := range h.Models.List() {
+		items = append(items, item{ID: spec.ID, Object: "model", Created: 1700000000, OwnedBy: "maika-hub", Available: h.modelAvailable(spec)})
+	}
+	if h.Workers != nil {
+		seen := make(map[string]bool, len(items))
+		for _, model := range items {
+			seen[model.ID] = true
 		}
-		items := make([]item, 0)
-		for _, spec := range h.Models.List() {
-			items = append(items, item{ID: spec.ID, Object: "model", Created: 1700000000, OwnedBy: spec.Provider, Available: h.modelAvailable(spec)})
-		}
-		if h.Workers != nil {
-			seen := make(map[string]bool, len(items))
-			for _, model := range items {
-				seen[model.ID] = true
-			}
-				for _, worker := range h.Workers.Snapshot() {
-					for _, modelID := range append([]string{worker.Model}, worker.Models...) {
-						if modelID != "" && !seen[modelID] {
-							owned := "remote_worker"
-							if strings.HasPrefix(modelID, "piper:") {
-								owned = "remote_piper"
-							}
-							items = append(items, item{ID: modelID, Object: "model", Created: 1700000000, OwnedBy: owned, Available: h.Workers.Available(modelID)})
-							seen[modelID] = true
-						}
-					}
+		for _, worker := range h.Workers.Snapshot() {
+			for _, modelID := range append([]string{worker.Model}, worker.Models...) {
+				if modelID != "" && !seen[modelID] {
+					items = append(items, item{ID: modelID, Object: "model", Created: 1700000000, OwnedBy: "maika-hub", Available: h.Workers.Available(modelID)})
+					seen[modelID] = true
 				}
+			}
 		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": items})
 }
 
@@ -262,84 +258,86 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-		chatReq := provider.ChatRequest{Model: req.Model, SessionID: r.Header.Get("X-Session-ID"), Messages: req.Messages, Tools: req.Tools, ToolChoice: req.ToolChoice, Stream: req.Stream, Temperature: req.Temperature, MaxTokens: req.MaxTokens}
-			isWorkerModel := false
-			if spec, ok := h.Models.Get(req.Model); ok && spec.Provider == "google_colab" {
-				isWorkerModel = true
-			} else if h.Workers != nil && h.Workers.Available(req.Model) {
-				isWorkerModel = true
-			}
-			if isWorkerModel {
-				if req.Stream {
-					h.streamColab(w, ctx, chatReq)
-					return
-				}
-				if h.Workers == nil {
-					writeError(w, http.StatusServiceUnavailable, "Worker unavailable", "provider_error", "worker_unavailable")
-					return
-				}
-				resp, err := h.Workers.Chat(ctx, chatReq)
-				if err != nil {
-					status, message, code := maskColabError(err)
-					writeError(w, status, message, "provider_error", code)
-					return
-				}
-				if strings.TrimSpace(resp.Content) == "" && len(resp.ToolCalls) == 0 {
-					writeError(w, http.StatusBadGateway, "upstream worker returned empty response", "provider_error", "empty_response")
-					return
-				}
-				h.AITokens.Add(uint64(resp.Usage.TotalTokens))
-			if h.Traffic != nil && resp.Usage.TotalTokens > 0 {
-				go func(tok int) { _ = h.Traffic.RecordMetrics(context.Background(), time.Now(), 0, int64(tok), 0) }(resp.Usage.TotalTokens)
-			}
-			finish := "stop" 
-			if resp.FinishReason != "" {
-				finish = resp.FinishReason
-			}
-			msg := &provider.Message{Role: "assistant", Content: resp.Content, ReasoningContent: resp.ReasoningContent, ToolCalls: resp.ToolCalls}
-			writeJSON(w, 200, ChatCompletionResponse{ID: resp.ID, Object: "chat.completion", Created: time.Now().Unix(), Model: req.Model, Choices: []Choice{{Index: 0, Message: msg, FinishReason: &finish}}, Usage: resp.Usage})
-			return
-		}
+	chatReq := provider.ChatRequest{Model: req.Model, SessionID: r.Header.Get("X-Session-ID"), Messages: req.Messages, Tools: req.Tools, ToolChoice: req.ToolChoice, Stream: req.Stream, Temperature: req.Temperature, MaxTokens: req.MaxTokens}
+	isWorkerModel := false
+	if spec, ok := h.Models.Get(req.Model); ok && spec.Provider == "google_colab" {
+		isWorkerModel = true
+	} else if h.Workers != nil && h.Workers.Available(req.Model) {
+		isWorkerModel = true
+	}
+	if isWorkerModel {
 		if req.Stream {
-			h.streamChat(w, ctx, chatReq)
+			h.streamColab(w, ctx, chatReq)
 			return
 		}
-		resp, err := h.Dispatcher.Chat(ctx, chatReq)
+		if h.Workers == nil {
+			writeError(w, http.StatusServiceUnavailable, "Worker unavailable", "provider_error", "worker_unavailable")
+			return
+		}
+		resp, err := h.Workers.Chat(ctx, chatReq)
 		if err != nil {
-			log.Printf("[GATEWAY] chat completion failed: %v", err)
-			status, userMsg, code := maskProviderError(err)
-			if h.AuditLog != nil {
-				_ = h.AuditLog.Record(ctx, admin.AuditEvent{
-					RequestID: r.Header.Get("X-Request-ID"),
-					EventType: "chat_completion",
-					Model:     req.Model,
-					Latency:   time.Since(started),
-					ErrorKind: code,
-					Detail:    userMsg,
-				})
-			}
-			writeError(w, status, userMsg, "provider_error", code)
+			status, message, code := maskColabError(err)
+			writeError(w, status, message, "provider_error", code)
 			return
 		}
+		if strings.TrimSpace(resp.Content) == "" && len(resp.ToolCalls) == 0 {
+			writeError(w, http.StatusBadGateway, "upstream worker returned empty response", "provider_error", "empty_response")
+			return
+		}
+		resp.Usage = provider.ComputeUsage(req.Messages, req.Tools, resp.Content, resp.ReasoningContent, resp.ToolCalls, &resp.Usage)
 		h.AITokens.Add(uint64(resp.Usage.TotalTokens))
 		if h.Traffic != nil && resp.Usage.TotalTokens > 0 {
 			go func(tok int) { _ = h.Traffic.RecordMetrics(context.Background(), time.Now(), 0, int64(tok), 0) }(resp.Usage.TotalTokens)
 		}
+		finish := "stop"
+		if resp.FinishReason != "" {
+			finish = resp.FinishReason
+		}
+		msg := &provider.Message{Role: "assistant", Content: resp.Content, ReasoningContent: resp.ReasoningContent, ToolCalls: resp.ToolCalls}
+		writeJSON(w, 200, ChatCompletionResponse{ID: resp.ID, Object: "chat.completion", Created: time.Now().Unix(), Model: req.Model, Choices: []Choice{{Index: 0, Message: msg, FinishReason: &finish}}, Usage: resp.Usage})
+		return
+	}
+	if req.Stream {
+		h.streamChat(w, ctx, chatReq)
+		return
+	}
+	resp, err := h.Dispatcher.Chat(ctx, chatReq)
+	if err != nil {
+		log.Printf("[GATEWAY] chat completion failed: %v", err)
+		status, userMsg, code := maskProviderError(err)
 		if h.AuditLog != nil {
 			_ = h.AuditLog.Record(ctx, admin.AuditEvent{
 				RequestID: r.Header.Get("X-Request-ID"),
 				EventType: "chat_completion",
 				Model:     req.Model,
 				Latency:   time.Since(started),
-				Detail:    "success",
+				ErrorKind: code,
+				Detail:    userMsg,
 			})
 		}
-		finish := "stop"
-		if resp.FinishReason != "" {
-			finish = resp.FinishReason
-		}
-			msg := &provider.Message{Role: "assistant", Content: resp.Content, ReasoningContent: resp.ReasoningContent, ToolCalls: resp.ToolCalls}
-			writeJSON(w, 200, ChatCompletionResponse{ID: resp.ID, Object: "chat.completion", Created: time.Now().Unix(), Model: req.Model, Choices: []Choice{{Index: 0, Message: msg, FinishReason: &finish}}, Usage: resp.Usage})
+		writeError(w, status, userMsg, "provider_error", code)
+		return
+	}
+	resp.Usage = provider.ComputeUsage(chatReq.Messages, chatReq.Tools, resp.Content, resp.ReasoningContent, resp.ToolCalls, &resp.Usage)
+	h.AITokens.Add(uint64(resp.Usage.TotalTokens))
+	if h.Traffic != nil && resp.Usage.TotalTokens > 0 {
+		go func(tok int) { _ = h.Traffic.RecordMetrics(context.Background(), time.Now(), 0, int64(tok), 0) }(resp.Usage.TotalTokens)
+	}
+	if h.AuditLog != nil {
+		_ = h.AuditLog.Record(ctx, admin.AuditEvent{
+			RequestID: r.Header.Get("X-Request-ID"),
+			EventType: "chat_completion",
+			Model:     req.Model,
+			Latency:   time.Since(started),
+			Detail:    "success",
+		})
+	}
+	finish := "stop"
+	if resp.FinishReason != "" {
+		finish = resp.FinishReason
+	}
+	msg := &provider.Message{Role: "assistant", Content: resp.Content, ReasoningContent: resp.ReasoningContent, ToolCalls: resp.ToolCalls}
+	writeJSON(w, 200, ChatCompletionResponse{ID: resp.ID, Object: "chat.completion", Created: time.Now().Unix(), Model: req.Model, Choices: []Choice{{Index: 0, Message: msg, FinishReason: &finish}}, Usage: resp.Usage})
 }
 
 func (h *Handler) streamChat(w http.ResponseWriter, ctx context.Context, req provider.ChatRequest) {
@@ -358,41 +356,63 @@ func (h *Handler) streamChat(w http.ResponseWriter, ctx context.Context, req pro
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-		id := "chatcmpl-" + strconv.FormatInt(time.Now().UnixNano(), 10)
-		created := time.Now().Unix()
-		send := func(v any) { b, _ := json.Marshal(v); fmt.Fprintf(w, "data: %s\n\n", b); flusher.Flush() }
-		for {
-			select {
-			case <-ctx.Done():
+	id := "chatcmpl-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	created := time.Now().Unix()
+	send := func(v any) { b, _ := json.Marshal(v); fmt.Fprintf(w, "data: %s\n\n", b); flusher.Flush() }
+	var streamContent strings.Builder
+	var streamReasoning strings.Builder
+	var streamToolCalls []provider.ToolCall
+	var streamUsage *provider.Usage
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case chunk, ok := <-stream:
+			if !ok {
+				toks := provider.ComputeUsage(req.Messages, req.Tools, streamContent.String(), streamReasoning.String(), streamToolCalls, streamUsage)
+				h.AITokens.Add(uint64(toks.TotalTokens))
+				if h.Traffic != nil && toks.TotalTokens > 0 {
+					go func(tok int) { _ = h.Traffic.RecordMetrics(context.Background(), time.Now(), 0, int64(tok), 0) }(toks.TotalTokens)
+				}
+				fmt.Fprint(w, "data: [DONE]\n\n")
+				flusher.Flush()
 				return
-			case chunk, ok := <-stream:
-				if !ok {
-					fmt.Fprint(w, "data: [DONE]\n\n")
-					flusher.Flush()
-					return
+			}
+			if chunk.Err != nil {
+				log.Printf("[GATEWAY] streaming provider error: %v", chunk.Err)
+				_, userMsg, code := maskProviderError(chunk.Err)
+				send(ErrorEnvelope{Error: APIError{Message: userMsg, Type: "provider_error", Code: code}})
+				return
+			}
+			streamContent.WriteString(chunk.Content)
+			streamReasoning.WriteString(chunk.ReasoningContent)
+			if len(chunk.ToolCalls) > 0 {
+				streamToolCalls = append(streamToolCalls, chunk.ToolCalls...)
+			}
+			if chunk.Usage != nil {
+				streamUsage = chunk.Usage
+			}
+			delta := &provider.Message{Role: "assistant", Content: chunk.Content, ReasoningContent: chunk.ReasoningContent, ToolCalls: chunk.ToolCalls}
+			var finish *string
+			if chunk.FinishReason != "" {
+				finish = &chunk.FinishReason
+			} else if chunk.Done {
+				s := "stop"
+				finish = &s
+			}
+			send(ChatCompletionResponse{ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model, Choices: []Choice{{Index: 0, Delta: delta, FinishReason: finish}}, Usage: usageOrEmpty(chunk.Usage)})
+			if chunk.Done {
+				toks := provider.ComputeUsage(req.Messages, req.Tools, streamContent.String(), streamReasoning.String(), streamToolCalls, streamUsage)
+				h.AITokens.Add(uint64(toks.TotalTokens))
+				if h.Traffic != nil && toks.TotalTokens > 0 {
+					go func(tok int) { _ = h.Traffic.RecordMetrics(context.Background(), time.Now(), 0, int64(tok), 0) }(toks.TotalTokens)
 				}
-				if chunk.Err != nil {
-					log.Printf("[GATEWAY] streaming provider error: %v", chunk.Err)
-					_, userMsg, code := maskProviderError(chunk.Err)
-					send(ErrorEnvelope{Error: APIError{Message: userMsg, Type: "provider_error", Code: code}})
-					return
-				}
-					delta := &provider.Message{Role: "assistant", Content: chunk.Content, ReasoningContent: chunk.ReasoningContent, ToolCalls: chunk.ToolCalls}
-					var finish *string
-					if chunk.FinishReason != "" {
-						finish = &chunk.FinishReason
-					} else if chunk.Done {
-						s := "stop"
-						finish = &s
-					}
-				send(ChatCompletionResponse{ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model, Choices: []Choice{{Index: 0, Delta: delta, FinishReason: finish}}, Usage: usageOrEmpty(chunk.Usage)})
-				if chunk.Done {
-					fmt.Fprint(w, "data: [DONE]\n\n")
-					flusher.Flush()
-					return
-				}
+				fmt.Fprint(w, "data: [DONE]\n\n")
+				flusher.Flush()
+				return
 			}
 		}
+	}
 }
 
 func usageOrEmpty(v *provider.Usage) provider.Usage {
@@ -435,7 +455,9 @@ func (h *Handler) AudioSpeech(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 	if h.Traffic != nil && len(data) > 0 {
 		sec := int64(len(data) / 44100)
-		if sec == 0 { sec = 1 }
+		if sec == 0 {
+			sec = 1
+		}
 		go func(s int64) { _ = h.Traffic.RecordMetrics(context.Background(), time.Now(), 0, 0, s) }(sec)
 	}
 }
@@ -572,9 +594,9 @@ func (h *Handler) DashboardStatus(w http.ResponseWriter, r *http.Request) {
 	} else {
 		status["breakers"] = map[string]string{}
 	}
-		if h.Credentials != nil {
-			for _, domain := range []string{"gemini_web", "google_colab", "copilot_ws", "piper_local", "tiktok_api", "deepseek_web"} {
-				items, err := h.Credentials.List(r.Context(), domain)
+	if h.Credentials != nil {
+		for _, domain := range []string{"gemini_web", "google_colab", "copilot_ws", "piper_local", "tiktok_api", "deepseek_web"} {
+			items, err := h.Credentials.List(r.Context(), domain)
 			if err == nil {
 				if h.Leases != nil {
 					for i := range items {
