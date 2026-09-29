@@ -313,6 +313,7 @@ function renderDeepSeekAccounts(accounts) {
           <span class="credential-meta-pill">${esc(a.max_concurrency)} slots</span></div>
       </div>
       <div class="account-actions-group">
+        <button class="icon-button" data-deepseek-login="${esc(a.identity_id)}" title="Mở trình duyệt đăng nhập lại">${icon('refresh')}</button>
         <button class="icon-button danger" data-deepseek-delete="${esc(a.identity_id)}" title="Xóa tài khoản DeepSeek">${icon('trash')}</button>
       </div>
     </article>`).join('') : '<div class="empty-state">Chưa có tài khoản DeepSeek. Nhấn "+ Thêm tài khoản DeepSeek" để thêm.</div>';
@@ -1072,25 +1073,52 @@ $('#add-tiktok-form')?.addEventListener('submit', async event => {
 	  }
 	});
 
-	$('#deepseek-account-list')?.addEventListener('click', async event => {
-	  const button = event.target.closest('[data-deepseek-delete]');
-	  const identityID = button?.dataset.deepseekDelete;
-	  if (!identityID || !confirm('Xóa tài khoản DeepSeek này và token đã mã hóa?')) return;
-	  button.disabled = true;
-	  try {
-	    const response = await fetchJSON('/admin/api/deepseek/accounts', {
-	      method: 'DELETE', headers: {'Content-Type': 'application/json'},
-	      body: JSON.stringify({identity_id: identityID})
-	    });
-	    const data = await response.json().catch(() => ({}));
-	    if (!response.ok) throw new Error(data?.error?.message || 'Không thể xóa tài khoản DeepSeek.');
-	    await loadDeepSeekAccounts();
-	  } catch (err) {
-	    alert(err.message || 'Không thể xóa tài khoản DeepSeek.');
-	  } finally {
-	    button.disabled = false;
-	  }
-	});
+		$('#deepseek-account-list')?.addEventListener('click', async event => {
+		  const loginBtn = event.target.closest('[data-deepseek-login]');
+		  const identityIDForLogin = loginBtn?.dataset.deepseekLogin;
+		  if (identityIDForLogin) {
+		    loginBtn.disabled = true;
+		    try {
+		      const r = await fetchJSON('/admin/api/deepseek/auto-login', {
+		        method: 'POST',
+		        headers: {'Content-Type': 'application/json'},
+		        body: JSON.stringify({id: identityIDForLogin})
+		      });
+		      const data = await r.json().catch(() => ({}));
+		      if (!r.ok) {
+		        showDeepSeekBrowserStatus(data?.error?.message || 'Không thể mở browser DeepSeek.', 'error');
+		        return;
+		      }
+		      showDeepSeekBrowserStatus(`Đã mở Chrome đăng nhập cho ${identityIDForLogin}. Đăng nhập trên màn hình desktop/VNC, hệ thống sẽ tự bắt token và đóng cửa sổ!`, 'info');
+		      stopDeepSeekLoginPoll();
+		      deepseekLoginPoll = setInterval(pollDeepSeekLoginStatus, 2000);
+		      await pollDeepSeekLoginStatus();
+		    } catch (err) {
+		      showDeepSeekBrowserStatus(err.message || 'Lỗi khi mở browser DeepSeek.', 'error');
+		    } finally {
+		      loginBtn.disabled = false;
+		    }
+		    return;
+		  }
+
+		  const button = event.target.closest('[data-deepseek-delete]');
+		  const identityID = button?.dataset.deepseekDelete;
+		  if (!identityID || !confirm('Xóa tài khoản DeepSeek này và token đã mã hóa?')) return;
+		  button.disabled = true;
+		  try {
+		    const response = await fetchJSON('/admin/api/deepseek/accounts', {
+		      method: 'DELETE', headers: {'Content-Type': 'application/json'},
+		      body: JSON.stringify({identity_id: identityID})
+		    });
+		    const data = await response.json().catch(() => ({}));
+		    if (!response.ok) throw new Error(data?.error?.message || 'Không thể xóa tài khoản DeepSeek.');
+		    await loadDeepSeekAccounts();
+		  } catch (err) {
+		    alert(err.message || 'Không thể xóa tài khoản DeepSeek.');
+		  } finally {
+		    button.disabled = false;
+		  }
+		});
 
 const copilotModal = $('#add-copilot-modal');
 const copilotForm = $('#add-copilot-form');
