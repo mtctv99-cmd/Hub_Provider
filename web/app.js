@@ -1039,41 +1039,7 @@ $('#add-tiktok-form')?.addEventListener('submit', async event => {
 	  }
 	});
 
-	// DeepSeek manual token save handler: user copies userToken from
-	// chat.deepseek.com localStorage after logging in on their own device,
-	// then pastes it into #deepseek-token-input and clicks save.
-	$('#save-deepseek-token')?.addEventListener('click', async () => {
-	  const input = $('#deepseek-token-input');
-	  const token = (input?.value || '').trim();
-	  if (!token || token.length < 20) {
-	    showDeepSeekBrowserStatus('Token DeepSeek không hợp lệ (tối thiểu 20 ký tự).', 'error');
-	    return;
-	  }
-	  const accountID = 'deepseek-main';
-	  const saveButton = $('#save-deepseek-token');
-	  if (saveButton) saveButton.disabled = true;
-	  try {
-	    const r = await fetchJSON('/admin/api/deepseek/accounts', {
-	      method: 'POST',
-	      headers: {'Content-Type': 'application/json'},
-	      body: JSON.stringify({email: 'deepseek@maika.sbs', identity_id: accountID, token: token, max_concurrency: 4})
-	    });
-	    const data = await r.json().catch(() => ({}));
-	    if (!r.ok) {
-	      showDeepSeekBrowserStatus(data?.error?.message || 'Không thể lưu token DeepSeek.', 'error');
-	      return;
-	    }
-	    if (input) input.value = '';
-	    showDeepSeekBrowserStatus('Đã lưu token DeepSeek, tài khoản đang hoạt động (HEALTHY).', 'success');
-	    await loadDeepSeekAccounts();
-	  } catch (err) {
-	    showDeepSeekBrowserStatus(err.message || 'Không thể lưu token DeepSeek.', 'error');
-	  } finally {
-	    if (saveButton) saveButton.disabled = false;
-	  }
-	});
-
-		$('#deepseek-account-list')?.addEventListener('click', async event => {
+	$('#deepseek-account-list')?.addEventListener('click', async event => {
 		  const loginBtn = event.target.closest('[data-deepseek-login]');
 		  const identityIDForLogin = loginBtn?.dataset.deepseekLogin;
 		  if (identityIDForLogin) {
