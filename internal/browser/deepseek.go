@@ -21,7 +21,14 @@ import (
 
 const deepseekHome = "https://chat.deepseek.com/sign_in"
 
-var deepseekProfileID = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
+var deepseekProfileID = regexp.MustCompile(`^[a-zA-Z0-9_.@+\-]{1,64}$`)
+
+func validDeepSeekProfileID(s string) bool {
+	if strings.Contains(s, "..") {
+		return false
+	}
+	return deepseekProfileID.MatchString(s)
+}
 
 // DeepSeekCapture được gọi khi bắt thành công userToken hợp lệ từ DeepSeek Web.
 type DeepSeekCapture func(ctx context.Context, accountID, email, token string) error
@@ -69,7 +76,7 @@ func (m *DeepSeekManager) Start(accountID string) (string, error) {
 	if accountID == "" {
 		accountID = "deepseek-" + randomProfileID()
 	}
-	if !deepseekProfileID.MatchString(accountID) {
+	if !validDeepSeekProfileID(accountID) {
 		return "", errors.New("invalid account id")
 	}
 	browserPath, err := (&Manager{}).FindBrowserPath()

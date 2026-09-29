@@ -23,7 +23,14 @@ import (
 
 const copilotHome = "https://m365.cloud.microsoft/chat"
 
-var copilotProfileID = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
+var copilotProfileID = regexp.MustCompile(`^[a-zA-Z0-9_.@+\-]{1,64}$`)
+
+func validCopilotProfileID(s string) bool {
+	if strings.Contains(s, "..") {
+		return false
+	}
+	return copilotProfileID.MatchString(s)
+}
 
 // CopilotCapture is invoked only after a captured Chathub URL passes structural,
 // expiry and user checks. Never return the URL to HTTP clients or logs.
@@ -63,7 +70,7 @@ func (m *CopilotManager) Start(accountID string) (string, error) {
 	if accountID == "" {
 		accountID = "copilot-" + randomProfileID()
 	}
-	if !copilotProfileID.MatchString(accountID) {
+	if !validCopilotProfileID(accountID) {
 		return "", errors.New("invalid account id")
 	}
 	browserPath, err := (&Manager{}).FindBrowserPath()
