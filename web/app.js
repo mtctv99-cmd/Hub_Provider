@@ -1013,6 +1013,31 @@ $('#add-tiktok-form')?.addEventListener('submit', async event => {
 	  }
 	}
 
+	$('#open-deepseek-browser')?.addEventListener('click', async () => {
+	  const button = $('#open-deepseek-browser');
+	  if (button) button.disabled = true;
+	  try {
+	    const r = await fetchJSON('/admin/api/deepseek/auto-login', {
+	      method: 'POST',
+	      headers: {'Content-Type': 'application/json'},
+	      body: '{}'
+	    });
+	    const data = await r.json().catch(() => ({}));
+	    if (!r.ok) {
+	      showDeepSeekBrowserStatus(data?.error?.message || 'Không thể mở browser DeepSeek trên server.', 'error');
+	      return;
+	    }
+	    showDeepSeekBrowserStatus('Đã mở Chrome DeepSeek. Hãy đăng nhập trên màn hình desktop/VNC; token sẽ được tự động bắt và lưu vào hệ thống!', 'info');
+	    stopDeepSeekLoginPoll();
+	    deepseekLoginPoll = setInterval(pollDeepSeekLoginStatus, 2000);
+	    await pollDeepSeekLoginStatus();
+	  } catch (err) {
+	    showDeepSeekBrowserStatus(err.message || 'Không thể mở browser DeepSeek.', 'error');
+	  } finally {
+	    if (button) button.disabled = false;
+	  }
+	});
+
 	// DeepSeek manual token save handler: user copies userToken from
 	// chat.deepseek.com localStorage after logging in on their own device,
 	// then pastes it into #deepseek-token-input and clicks save.

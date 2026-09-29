@@ -96,6 +96,17 @@ func (m *DeepSeekManager) Start(accountID string) (string, error) {
 		"--no-default-browser-check",
 		deepseekHome,
 	)
+	cmd.Env = os.Environ()
+	hasDisplay := false
+	for _, env := range cmd.Env {
+		if strings.HasPrefix(env, "DISPLAY=") {
+			hasDisplay = true
+			break
+		}
+	}
+	if !hasDisplay {
+		cmd.Env = append(cmd.Env, "DISPLAY=:1")
+	}
 	if err := cmd.Start(); err != nil {
 		cancel()
 		return "", errors.New("unable to start browser")
