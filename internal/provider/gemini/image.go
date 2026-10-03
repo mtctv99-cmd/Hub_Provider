@@ -9,6 +9,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,7 +41,7 @@ func (a *Adapter) Image(ctx context.Context, req provider.ImageRequest, secret [
 	}
 	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
-	raw, err := a.generateRaw(ctx, "Generate an image of: "+req.Prompt, req.Model, cookie, ConversationMetadata{}, nil, maxImageRPCBytes)
+	raw, err := a.generateImageRaw(ctx, "Generate an image of: "+req.Prompt, req.Model, cookie)
 	if err != nil {
 		return provider.ImageResponse{}, err
 	}
@@ -49,6 +50,57 @@ func (a *Adapter) Image(ctx context.Context, req provider.ImageRequest, secret [
 		return provider.ImageResponse{}, err
 	}
 	return a.downloadGeneratedImage(ctx, imageURL)
+}
+
+func (a *Adapter) generateImageRaw(ctx context.Context, prompt, model, cookie string) (string, error) {
+	a.syncTokenBaseURL()
+	tokens, err := a.Tokens.Get(ctx, cookie)
+	if err != nil {
+		return "", err
+	}
+	if tokens.XSRF == "" {
+		return "", fmt.Errorf("gemini page did not expose XSRF token")
+	}
+	body := BuildPayload(prompt, model, tokens.XSRF, "", ConversationMetadata{}, nil)
+	u, _ := url.Parse(a.BaseURL + "/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate")
+	q := u.Query()
+	q.Set("bl", tokens.BL)
+	q.Set("hl", "en")
+	q.Set("_reqid", strconv.FormatInt(time.Now().Unix()%1000000, 10))
+	q.Set("rt", "c")
+	if tokens.FSID != "" {
+		q.Set("f.sid", tokens.FSID)
+	}
+	u.RawQuery = q.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), strings.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	for key, value := range headers(cookie, SapisidFromCookie(cookie), time.Now()) {
+		req.Header[key] = value
+	}
+	req.Header.Set("x-goog-ext-525001261-jspb", imageRPCHeader())
+	resp, err := a.Client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxImageRPCBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if int64(len(raw)) > maxImageRPCBytes {
+		return "", fmt.Errorf("gemini image RPC response exceeded bounded maximum of %d bytes", maxImageRPCBytes)
+	}
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("gemini RPC HTTP %d: %s", resp.StatusCode, truncate(string(raw), 300))
+	}
+	return string(raw), nil
+}
+
+func imageRPCHeader() string {
+	// Mode 10 bật Imagen trong StreamGenerate RPC, tách khỏi header chat text 71c2d248d3b102ff.
+	return `[1,null,null,null,"56fdd199312815e2",null,null,0,[4,5,6,8,4,5,6,8],null,null,2,null,null,1,1,"37148B01-D513-431C-B2FD-18F42A6EFE22"]`
 }
 
 func generatedImageURL(raw string) (string, bool) {
@@ -102,6 +154,9 @@ func extractGeneratedImageURL(raw string) (string, error) {
 		if json.Unmarshal([]byte(payload), &inner) != nil || len(inner) <= 4 {
 			return "", errors.New("invalid gemini image response")
 		}
+		if u, ok := scanInlineImageURL(payload); ok {
+			return u, nil
+		}
 		var candidates []json.RawMessage
 		if json.Unmarshal(inner[4], &candidates) != nil {
 			return "", errors.New("invalid gemini image candidates")
@@ -151,6 +206,41 @@ func extractGeneratedImageURL(raw string) (string, error) {
 		return "", errors.New("gemini image response contains no supported generated image")
 	}
 	return found, nil
+}
+
+func scanInlineImageURL(payload string) (string, bool) {
+	var v any
+	if json.Unmarshal([]byte(payload), &v) != nil {
+		return "", false
+	}
+	found := ""
+	var walk func(node any, depth int) bool
+	walk = func(node any, depth int) bool {
+		if depth > 12 || found != "" {
+			return found != ""
+		}
+		if s, ok := node.(string); ok {
+			if strings.Contains(s, "googleusercontent.com") {
+				if u, ok := generatedImageURL(s); ok {
+					found = u
+					return true
+				}
+			}
+			return false
+		}
+		if arr, ok := node.([]any); ok {
+			for _, child := range arr {
+				if walk(child, depth+1) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if walk(v, 0) && found != "" {
+		return found, true
+	}
+	return "", false
 }
 
 func isRPCFrameLength(s string) bool {
