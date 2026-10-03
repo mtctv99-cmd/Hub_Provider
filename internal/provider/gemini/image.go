@@ -132,76 +132,78 @@ func extractGeneratedImageURL(raw string) (string, error) {
 			continue // XSSI prefix and RPC length frames
 		}
 		if !strings.HasPrefix(line, "[[") {
-			return "", errors.New("invalid gemini image RPC frame")
+			continue
 		}
 		var rows []json.RawMessage
-		if json.Unmarshal([]byte(line), &rows) != nil || len(rows) != 1 {
-			return "", errors.New("invalid gemini image RPC frame")
-		}
-		var row []json.RawMessage
-		if json.Unmarshal(rows[0], &row) != nil || len(row) < 3 {
-			return "", errors.New("invalid gemini image RPC row")
-		}
-		var kind string
-		if json.Unmarshal(row[0], &kind) != nil || kind != "wrb.fr" {
+		if json.Unmarshal([]byte(line), &rows) != nil || len(rows) == 0 {
 			continue
 		}
-		var payload string
-		if json.Unmarshal(row[2], &payload) != nil {
-			return "", errors.New("invalid gemini image RPC payload")
-		}
-		var inner []json.RawMessage
-		if json.Unmarshal([]byte(payload), &inner) != nil {
-			continue
-		}
-		if u, ok := scanInlineImageURL(payload); ok {
-			return u, nil
-		}
-		if len(inner) <= 4 {
-			continue
-		}
-		var candidates []json.RawMessage
-		if json.Unmarshal(inner[4], &candidates) != nil {
-			return "", errors.New("invalid gemini image candidates")
-		}
-		for _, item := range candidates {
-			var candidate []json.RawMessage
-			if json.Unmarshal(item, &candidate) != nil || len(candidate) <= 12 || string(candidate[12]) == "null" {
+		for _, rawRow := range rows {
+			var row []json.RawMessage
+			if json.Unmarshal(rawRow, &row) != nil || len(row) < 3 {
 				continue
 			}
-			// candidate[12] is the generated-image attachment branch.
-			var attachment any
-			if json.Unmarshal(candidate[12], &attachment) != nil {
-				return "", errors.New("invalid gemini image attachment")
+			var kind string
+			if json.Unmarshal(row[0], &kind) != nil || kind != "wrb.fr" {
+				continue
 			}
-			count := 0
-			var walk func(any, int) error
-			walk = func(v any, depth int) error {
-				count++
-				if count > 2048 || depth > 12 {
-					return errors.New("gemini image attachment exceeds parsing bounds")
+			var payload string
+			if json.Unmarshal(row[2], &payload) != nil {
+				continue
+			}
+			var inner []json.RawMessage
+			if json.Unmarshal([]byte(payload), &inner) != nil {
+				continue
+			}
+			if u, ok := scanInlineImageURL(payload); ok {
+				return u, nil
+			}
+			if len(inner) <= 4 {
+				continue
+			}
+			var candidates []json.RawMessage
+			if json.Unmarshal(inner[4], &candidates) != nil {
+				continue
+			}
+			for _, item := range candidates {
+				var candidate []json.RawMessage
+				if json.Unmarshal(item, &candidate) != nil || len(candidate) <= 12 || string(candidate[12]) == "null" {
+					continue
 				}
-				switch node := v.(type) {
-				case string:
-					if strings.HasPrefix(node, "https://") {
-						if u, ok := generatedImageURL(node); ok {
-							if found != "" && found != u {
-								return errors.New("gemini image response contains multiple images")
+				// candidate[12] is the generated-image attachment branch.
+				var attachment any
+				if json.Unmarshal(candidate[12], &attachment) != nil {
+					continue
+				}
+				count := 0
+				var walk func(any, int) error
+				walk = func(v any, depth int) error {
+					count++
+					if count > 2048 || depth > 12 {
+						return errors.New("gemini image attachment exceeds parsing bounds")
+					}
+					switch node := v.(type) {
+					case string:
+						if strings.HasPrefix(node, "https://") {
+							if u, ok := generatedImageURL(node); ok {
+								if found != "" && found != u {
+									return errors.New("gemini image response contains multiple images")
+								}
+								found = u
 							}
-							found = u
+						}
+					case []any:
+						for _, child := range node {
+							if err := walk(child, depth+1); err != nil {
+								return err
+							}
 						}
 					}
-				case []any:
-					for _, child := range node {
-						if err := walk(child, depth+1); err != nil {
-							return err
-						}
-					}
+					return nil
 				}
-				return nil
-			}
-			if err := walk(attachment, 0); err != nil {
-				return "", err
+				if err := walk(attachment, 0); err == nil && found != "" {
+					return found, nil
+				}
 			}
 		}
 	}
