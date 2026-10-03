@@ -111,16 +111,56 @@ func imageRPCHeader() string {
 
 func generatedImageURL(raw string) (string, bool) {
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.Host != "lh3.googleusercontent.com" || u.User != nil || u.Fragment != "" || u.Opaque != "" || u.RawQuery != "" {
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Fragment != "" || u.Opaque != "" || u.RawQuery != "" {
 		return "", false
 	}
-	if !strings.HasPrefix(u.Path, "/gg/") && !strings.HasPrefix(u.Path, "/gg-dl/") {
+	switch u.Host {
+	case "lh3.googleusercontent.com":
+		if !strings.HasPrefix(u.Path, "/gg/") && !strings.HasPrefix(u.Path, "/gg-dl/") {
+			return "", false
+		}
+	case "work.fife.usercontent.google.com":
+		if !strings.HasPrefix(u.Path, "/rd-gg-dl/") {
+			return "", false
+		}
+	default:
 		return "", false
 	}
 	if len(u.Path) > 2048 || len(u.Path) < 10 || strings.ContainsAny(u.Path, "\\%") || u.EscapedPath() != u.Path {
 		return "", false
 	}
 	return raw, true
+}
+
+func generatedImageRedirectURL(raw string) (string, bool) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Fragment != "" || u.Opaque != "" {
+		return "", false
+	}
+	switch u.Host {
+	case "lh3.googleusercontent.com", "work.fife.usercontent.google.com":
+		return raw, true
+	}
+	return "", false
+}
+
+func validateImageRedirect(req *http.Request, via []*http.Request) error {
+	if req.URL.Scheme != "https" {
+		return errors.New("gemini image redirect rejected")
+	}
+	// Giữ cookie phiên và referer khi theo redirect CDN nội bộ Google.
+	if len(via) > 0 {
+		if c := via[0].Header.Get("Cookie"); c != "" {
+			req.Header.Set("Cookie", c)
+		}
+		if r := via[0].Header.Get("Referer"); r != "" {
+			req.Header.Set("Referer", r)
+		}
+	}
+	if _, ok := generatedImageRedirectURL(req.URL.String()); !ok {
+		return errors.New("gemini image redirect rejected")
+	}
+	return nil
 }
 
 func extractGeneratedImageURL(raw string) (string, error) {
@@ -280,7 +320,14 @@ func (a *Adapter) downloadGeneratedImageWithCookie(ctx context.Context, rawURL, 
 	}
 	copyClient := *client
 	copyClient.Timeout = 30 * time.Second
-	copyClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+	copyClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 4 {
+			return errors.New("gemini image redirect rejected")
+		}
+		if u, ok := generatedImageRedirectURL(req.URL.String()); ok {
+			_ = u
+			return validateImageRedirect(req, via)
+		}
 		return errors.New("gemini image redirect rejected")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
