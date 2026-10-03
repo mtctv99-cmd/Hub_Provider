@@ -151,11 +151,14 @@ func extractGeneratedImageURL(raw string) (string, error) {
 			return "", errors.New("invalid gemini image RPC payload")
 		}
 		var inner []json.RawMessage
-		if json.Unmarshal([]byte(payload), &inner) != nil || len(inner) <= 4 {
-			return "", errors.New("invalid gemini image response")
+		if json.Unmarshal([]byte(payload), &inner) != nil {
+			continue
 		}
 		if u, ok := scanInlineImageURL(payload); ok {
 			return u, nil
+		}
+		if len(inner) <= 4 {
+			continue
 		}
 		var candidates []json.RawMessage
 		if json.Unmarshal(inner[4], &candidates) != nil {
