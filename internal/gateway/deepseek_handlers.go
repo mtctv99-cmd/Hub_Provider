@@ -46,6 +46,7 @@ func (h *Handler) DeepSeekBrowserManager() *browser.DeepSeekManager {
 			Domain:         "deepseek_web",
 			MaxConcurrency: 2,
 			Status:         identity.StatusHealthy,
+			SourceRef:      "browser_profile:" + accountID,
 		}, secretBytes)
 	})
 	actual, _ := deepseekBrowsers.LoadOrStore(h, candidate)
@@ -67,7 +68,23 @@ func (h *Handler) DeepSeekAutoLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Body != nil && r.ContentLength != 0 && !decodeJSON(w, r, &req) {
 		return
 	}
-	id, err := h.DeepSeekBrowserManager().Start(strings.TrimSpace(req.ID))
+	requestedID := strings.TrimSpace(req.ID)
+	profileID := requestedID
+	manager, _ := h.Credentials.(*identity.Manager)
+	if manager != nil && requestedID != "" {
+		if detail, err := manager.GetIdentityDetail(r.Context(), requestedID); err == nil {
+			for _, cred := range detail.Credentials {
+				if cred == nil || cred.Domain != "deepseek_web" {
+					continue
+				}
+				if profile := strings.TrimPrefix(cred.SourceRef, "browser_profile:"); profile != cred.SourceRef && profile != "" {
+					profileID = profile
+					break
+				}
+			}
+		}
+	}
+	id, err := h.DeepSeekBrowserManager().Start(profileID)
 	if err != nil {
 		status := http.StatusInternalServerError
 		code := "browser_start_failed"
@@ -267,9 +284,14 @@ func (h *Handler) DeepSeekAccounts(w http.ResponseWriter, r *http.Request) {
 
 	items := make([]map[string]any, 0, len(creds))
 	for _, c := range creds {
+		profileID := strings.TrimPrefix(c.SourceRef, "browser_profile:")
+		if profileID == c.SourceRef || profileID == "" {
+			profileID = c.IdentityID
+		}
 		items = append(items, map[string]any{
 			"id":              c.ID,
 			"identity_id":     c.IdentityID,
+			"profile_id":      profileID,
 			"status":          c.Status,
 			"max_concurrency": c.MaxConcurrency,
 		})
