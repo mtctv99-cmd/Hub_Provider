@@ -29,9 +29,9 @@ type Message struct {
 	Content          string        `json:"content"`
 	ReasoningContent string        `json:"reasoning_content,omitempty"`
 	Name             string        `json:"name,omitempty"`
-	ToolCallID string        `json:"tool_call_id,omitempty"`
-	ToolCalls  []ToolCall    `json:"tool_calls,omitempty"`
-	Parts      []ContentPart `json:"content_parts,omitempty"`
+	ToolCallID       string        `json:"tool_call_id,omitempty"`
+	ToolCalls        []ToolCall    `json:"tool_calls,omitempty"`
+	Parts            []ContentPart `json:"content_parts,omitempty"`
 }
 
 type Tool struct {
@@ -56,22 +56,22 @@ type FunctionCallDesc struct {
 	Arguments string `json:"arguments"`
 }
 
-	func (m *Message) UnmarshalJSON(data []byte) error {
-		var raw struct {
-			Role             string          `json:"role"`
-			Content          json.RawMessage `json:"content"`
-			ReasoningContent string          `json:"reasoning_content"`
-			Name             string          `json:"name"`
-			ToolCallID       string          `json:"tool_call_id"`
-			ToolCalls        []ToolCall      `json:"tool_calls"`
-			ContentParts     []ContentPart   `json:"content_parts"`
-		}
-		if err := json.Unmarshal(data, &raw); err != nil {
-			return err
-		}
-		m.Role = raw.Role
-		m.ReasoningContent = raw.ReasoningContent
-		m.Name = raw.Name
+func (m *Message) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Role             string          `json:"role"`
+		Content          json.RawMessage `json:"content"`
+		ReasoningContent string          `json:"reasoning_content"`
+		Name             string          `json:"name"`
+		ToolCallID       string          `json:"tool_call_id"`
+		ToolCalls        []ToolCall      `json:"tool_calls"`
+		ContentParts     []ContentPart   `json:"content_parts"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	m.Role = raw.Role
+	m.ReasoningContent = raw.ReasoningContent
+	m.Name = raw.Name
 	m.ToolCallID = raw.ToolCallID
 	m.ToolCalls = raw.ToolCalls
 	m.Parts = raw.ContentParts
@@ -89,6 +89,30 @@ type FunctionCallDesc struct {
 		}
 	}
 	return nil
+}
+
+func (m Message) MarshalJSON() ([]byte, error) {
+	type rawMessage struct {
+		Role             string        `json:"role"`
+		Content          any           `json:"content"`
+		ReasoningContent string        `json:"reasoning_content,omitempty"`
+		Name             string        `json:"name,omitempty"`
+		ToolCallID       string        `json:"tool_call_id,omitempty"`
+		ToolCalls        []ToolCall    `json:"tool_calls,omitempty"`
+	}
+	raw := rawMessage{
+		Role:             m.Role,
+		ReasoningContent: m.ReasoningContent,
+		Name:             m.Name,
+		ToolCallID:       m.ToolCallID,
+		ToolCalls:        m.ToolCalls,
+	}
+	if len(m.Parts) > 0 {
+		raw.Content = m.Parts
+	} else {
+		raw.Content = m.Content
+	}
+	return json.Marshal(raw)
 }
 
 type ContentPart struct {
@@ -165,6 +189,54 @@ type Usage struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
+// EstimateTokens provides a lightweight approximation (~4 characters per token).
+func EstimateTokens(text string) int {
+	if text == "" {
+		return 0
+	}
+	r := []rune(text)
+	tok := len(r) / 4
+	if tok == 0 && len(r) > 0 {
+		tok = 1
+	}
+	return tok
+}
+
+// ComputeUsage calculates or estimates token usage for chat completions.
+func ComputeUsage(messages []Message, tools []Tool, content string, reasoning string, toolCalls []ToolCall, existing *Usage) Usage {
+	if existing != nil && existing.TotalTokens > 0 {
+		return *existing
+	}
+	promptChars := 0
+	for _, m := range messages {
+		promptChars += len([]rune(m.Content)) + len([]rune(m.ReasoningContent)) + 4
+		for _, p := range m.Parts {
+			promptChars += len([]rune(p.Text))
+		}
+	}
+	for _, t := range tools {
+		promptChars += len([]rune(t.Function.Name)) + len([]rune(t.Function.Description)) + 10
+	}
+	compChars := len([]rune(content)) + len([]rune(reasoning))
+	for _, tc := range toolCalls {
+		compChars += len([]rune(tc.Function.Name)) + len([]rune(tc.Function.Arguments))
+	}
+
+	pTokens := (promptChars + 3) / 4
+	if pTokens == 0 && len(messages) > 0 {
+		pTokens = 1
+	}
+	cTokens := (compChars + 3) / 4
+	if cTokens == 0 && (len(content) > 0 || len(reasoning) > 0 || len(toolCalls) > 0) {
+		cTokens = 1
+	}
+	return Usage{
+		PromptTokens:     pTokens,
+		CompletionTokens: cTokens,
+		TotalTokens:      pTokens + cTokens,
+	}
+}
+
 type ChatResponse struct {
 	ID               string        `json:"id"`
 	Model            string        `json:"model"`
@@ -180,11 +252,11 @@ type StreamChunk struct {
 	Content          string        `json:"content"`
 	ReasoningContent string        `json:"reasoning_content,omitempty"`
 	ToolCalls        []ToolCall    `json:"tool_calls,omitempty"`
-	FinishReason string        `json:"finish_reason,omitempty"`
-	Done         bool          `json:"done"`
-	Usage        *Usage        `json:"usage,omitempty"`
-	Err          error         `json:"err,omitempty"`
-	Upstream     UpstreamState `json:"upstream,omitempty"`
+	FinishReason     string        `json:"finish_reason,omitempty"`
+	Done             bool          `json:"done"`
+	Usage            *Usage        `json:"usage,omitempty"`
+	Err              error         `json:"err,omitempty"`
+	Upstream         UpstreamState `json:"upstream,omitempty"`
 }
 
 type SpeechRequest struct {
@@ -195,9 +267,10 @@ type SpeechRequest struct {
 }
 
 type ImageRequest struct {
-	Model  string `json:"model"`
-	Prompt string `json:"prompt"`
-	Size   string `json:"size,omitempty"`
+	Model     string `json:"model"`
+	Prompt    string `json:"prompt"`
+	Size      string `json:"size,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
 }
 
 type ImageResponse struct {

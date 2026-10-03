@@ -274,12 +274,13 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "Worker unavailable", "provider_error", "worker_unavailable")
 			return
 		}
-		resp, err := h.Workers.Chat(ctx, chatReq)
-		if err != nil {
-			status, message, code := maskColabError(err)
-			writeError(w, status, message, "provider_error", code)
-			return
-		}
+			resp, err := h.Workers.Chat(ctx, chatReq)
+			if err != nil {
+				log.Printf("[GATEWAY] colab chat failed: %v", err)
+				status, message, code := maskColabError(err)
+				writeError(w, status, message, "provider_error", code)
+				return
+			}
 		if strings.TrimSpace(resp.Content) == "" && len(resp.ToolCalls) == 0 {
 			writeError(w, http.StatusBadGateway, "upstream worker returned empty response", "provider_error", "empty_response")
 			return
@@ -484,7 +485,11 @@ func (h *Handler) Images(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "response_format must be url or b64_json", "invalid_request_error", "unsupported_option")
 		return
 	}
-	resp, err := h.Dispatcher.Image(r.Context(), provider.ImageRequest{Model: req.Model, Prompt: req.Prompt, Size: req.Size})
+	sessID := strings.TrimSpace(r.Header.Get("X-Session-ID"))
+	if sessID == "" {
+		sessID = strings.TrimSpace(r.URL.Query().Get("session_id"))
+	}
+	resp, err := h.Dispatcher.Image(r.Context(), provider.ImageRequest{Model: req.Model, Prompt: req.Prompt, Size: req.Size, SessionID: sessID})
 	if err != nil {
 		log.Printf("[GATEWAY] image generation failed: %v", err)
 		status, userMsg, code := maskProviderError(err)

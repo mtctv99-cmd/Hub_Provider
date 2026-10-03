@@ -341,7 +341,9 @@ func (d *Dispatcher) Image(ctx context.Context, req provider.ImageRequest) (prov
 	if err != nil {
 		return provider.ImageResponse{}, err
 	}
+	creds = d.orderedCredentials(creds, req.SessionID)
 	now := time.Now()
+	lastErr := error(nil)
 	for _, cred := range creds {
 		if (cred.Status != identity.StatusHealthy && cred.Status != identity.StatusDegraded) || (cred.CooldownUntil != nil && now.Before(*cred.CooldownUntil)) {
 			continue
@@ -371,8 +373,15 @@ func (d *Dispatcher) Image(ctx context.Context, req provider.ImageRequest) (prov
 		d.release(lease)
 		d.recordAttempt(ctx, spec.Provider, cred.ID, callErr)
 		if callErr == nil {
+			d.bindSession(req.SessionID, cred.ID, spec.Provider, provider.UpstreamState{})
 			return result, nil
 		}
+		if lastErr == nil {
+			lastErr = callErr
+		}
+	}
+	if lastErr != nil {
+		return provider.ImageResponse{}, lastErr
 	}
 	return provider.ImageResponse{}, ErrNoAvailableCredential
 }
