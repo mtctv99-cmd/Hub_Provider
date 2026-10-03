@@ -49,7 +49,13 @@ func (a *Adapter) Image(ctx context.Context, req provider.ImageRequest, secret [
 	if err != nil {
 		return provider.ImageResponse{}, err
 	}
-	return a.downloadGeneratedImage(ctx, imageURL)
+	if resp, dlErr := a.downloadGeneratedImageWithCookie(ctx, imageURL, "", false); dlErr == nil {
+		return resp, nil
+	}
+	// ponytail: CDN lh3.googleusercontent.com thường 403 khi thiếu Cookie/Referer.
+	// Retry 1 lần kèm cookie phiên (không gửi Authorization) vì URL gg-dl là
+	// signed URL gắn phiên, không phải asset public.
+	return a.downloadGeneratedImageWithCookie(ctx, imageURL, cookie, true)
 }
 
 func (a *Adapter) generateImageRaw(ctx context.Context, prompt, model, cookie string) (string, error) {
@@ -261,6 +267,10 @@ func isRPCFrameLength(s string) bool {
 }
 
 func (a *Adapter) downloadGeneratedImage(ctx context.Context, rawURL string) (provider.ImageResponse, error) {
+	return a.downloadGeneratedImageWithCookie(ctx, rawURL, "", false)
+}
+
+func (a *Adapter) downloadGeneratedImageWithCookie(ctx context.Context, rawURL, cookie string, withCookie bool) (provider.ImageResponse, error) {
 	if _, ok := generatedImageURL(rawURL); !ok {
 		return provider.ImageResponse{}, errors.New("gemini generated image URL is not allowed")
 	}
@@ -276,6 +286,11 @@ func (a *Adapter) downloadGeneratedImage(ctx context.Context, rawURL string) (pr
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return provider.ImageResponse{}, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+	req.Header.Set("Referer", "https://gemini.google.com/")
+	if withCookie && cookie != "" {
+		req.Header.Set("Cookie", cookie)
 	}
 	resp, err := copyClient.Do(req)
 	if err != nil {
