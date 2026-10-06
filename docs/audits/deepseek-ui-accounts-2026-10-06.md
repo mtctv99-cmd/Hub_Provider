@@ -2,13 +2,19 @@
 
 ## 1. Kết Quả Đăng Nhập Tài Khoản DeepSeek (Production)
 Chạy script Playwright auto-login trên server production (`192.168.1.117`):
-- `thanhchuapi3@gmail.com`: **SUCCESS** (profile `thanhchuapi3_gmail_com`) $\rightarrow$ Credential: `google-f6e05bb22abb17be-deepseek_web`, Status: `HEALTHY`.
-- `thanhchuapi4@gmail.com`: **SUCCESS** (profile `thanhchuapi4_gmail_com`) $\rightarrow$ Credential: `google-844b35752f20d6c5-deepseek_web`, Status: `HEALTHY`.
-- `thanhchuapi5@gmail.com`: **SUCCESS** (profile `thanhchuapi5_gmail_com`) $\rightarrow$ Credential: `google-b97fb3bf2cf2f492-deepseek_web`, Status: `HEALTHY`.
+- `thanhchuapi3@gmail.com`: **SUCCESS** $\rightarrow$ `Status: HEALTHY`, slots = 1.
+- `thanhchuapi4@gmail.com`: **SUCCESS** $\rightarrow$ `Status: HEALTHY`, slots = 1.
+- `thanhchuapi5@gmail.com`: **SUCCESS** $\rightarrow$ `Status: HEALTHY`, slots = 1.
+- `thanhchuapi6@gmail.com`: **SUCCESS** $\rightarrow$ `Status: HEALTHY`, slots = 1.
+- `thanhchuapi7@gmail.com`: **SUCCESS** $\rightarrow$ `Status: HEALTHY`, slots = 1.
+- `thanhchuapi8@gmail.com`: **SUCCESS** $\rightarrow$ `Status: HEALTHY`, slots = 1.
+- `thanhchuapi9@gmail.com`: **SUCCESS** $\rightarrow$ `Status: HEALTHY`, slots = 1.
 
 Tình trạng 2 tài khoản cũ:
 - `thanhchuapi1@gmail.com`: `RATE_LIMITED` (mở chặn: `2026-10-10 23:51:26 +0700`)
 - `thanhchuapi2@gmail.com`: `RATE_LIMITED` (mở chặn: `2026-10-12 02:02:57 +0700`)
+
+Tổng số tài khoản trong pool: 9 (7 sẵn sàng, 2 chờ mở chặn tự động). Tỷ lệ điều phối 40% phiên = 3-4 tài khoản phiên, còn lại chạy thường; tài khoản phiên rảnh tự động phụ chạy thường.
 
 ## 2. Logic Điều Phối Tự Động Mở Chặn (Auto-Unblock & Reuse)
 - **File:** `internal/scheduler/dispatch.go`
