@@ -161,13 +161,9 @@ func (h *Handler) DeepSeekAccounts(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if req.MaxConcurrency <= 0 {
-			req.MaxConcurrency = 2
-		}
-		if req.MaxConcurrency > 16 {
-			writeError(w, http.StatusUnprocessableEntity, "max_concurrency must be between 1 and 16", "invalid_request_error", "invalid_concurrency")
-			return
-		}
+			// DeepSeek Web is strictly limited to 1 concurrent request per account
+			// to avoid rate-limiting and anti-abuse account muting.
+			req.MaxConcurrency = 1
 
 		token := strings.TrimSpace(req.Token)
 		if token == "" || len(token) > 4096 {

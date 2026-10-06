@@ -54,7 +54,7 @@ def save_to_db(email: str, token: str):
     profile_dir = profile_for(email)
     conn.execute("""
         INSERT INTO credentials (id, identity_id, domain, status, max_concurrency, pool_role, source_ref, last_error_kind, consecutive_errors)
-        VALUES (?, ?, 'deepseek_web', 'HEALTHY', 2, 'AUTO', ?, '', 0)
+        VALUES (?, ?, 'deepseek_web', 'HEALTHY', 1, 'AUTO', ?, '', 0)
         ON CONFLICT(id) DO UPDATE SET
             status = 'HEALTHY',
             source_ref = excluded.source_ref,

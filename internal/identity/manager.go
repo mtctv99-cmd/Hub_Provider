@@ -177,6 +177,9 @@ func (m *Manager) UpsertCredential(ctx context.Context, c Credential, plaintextS
 	if c.MaxConcurrency < 1 {
 		c.MaxConcurrency = 1
 	}
+	if c.Domain == "deepseek_web" {
+		c.MaxConcurrency = 1
+	}
 	tx, err := m.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -393,6 +396,9 @@ func (m *Manager) List(ctx context.Context, domain string) ([]Credential, error)
 		}
 		if lastUsed.Valid {
 			c.LastUsedAt = &lastUsed.Time
+		}
+		if c.Domain == "deepseek_web" {
+			c.MaxConcurrency = 1
 		}
 		c.SourceRef, c.Fingerprint, c.LastErrorKind = sourceRef.String, fingerprint.String, lastError.String
 		c.PoolRole = poolRoleOrAuto(PoolRole(poolRole.String))

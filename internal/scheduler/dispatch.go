@@ -110,44 +110,56 @@ func (d *Dispatcher) chatOnce(ctx context.Context, req provider.ChatRequest) (pr
 	if upstream, ok := d.sessionUpstream(req.SessionID); ok {
 		req.Upstream = upstream
 	}
-	creds, err = d.chatCredentials(creds, req.SessionID, spec.Provider)
-	if err != nil {
-		return provider.ChatResponse{}, err
-	}
-	now := time.Now()
-	lastErr := error(ErrNoAvailableCredential)
-	skippedStatus, skippedBreaker := 0, 0
+		creds, err = d.chatCredentials(creds, req.SessionID, spec.Provider)
+		if err != nil {
+			return provider.ChatResponse{}, err
+		}
+		isBoundSession := false
+		if d.Sessions != nil && strings.TrimSpace(req.SessionID) != "" {
+			if b, ok := d.Sessions.Get(req.SessionID); ok && b.Provider == spec.Provider {
+				isBoundSession = true
+			}
+		}
+		now := time.Now()
+		lastErr := error(ErrNoAvailableCredential)
+		skippedStatus, skippedBreaker := 0, 0
 		for _, cred := range creds {
 			cred = d.recoverCooldownIfExpired(ctx, cred, now)
 			if ctx.Err() != nil {
 				return provider.ChatResponse{}, ctx.Err()
 			}
-		if (cred.Status != identity.StatusHealthy && cred.Status != identity.StatusDegraded) || (cred.CooldownUntil != nil && now.Before(*cred.CooldownUntil)) {
-			skippedStatus++
-			continue
-		}
-		if d.Breakers != nil {
-			if !d.Breakers.Get(spec.Provider).Allow(now) {
-				skippedBreaker++
+			if (cred.Status != identity.StatusHealthy && cred.Status != identity.StatusDegraded) || (cred.CooldownUntil != nil && now.Before(*cred.CooldownUntil)) {
+				skippedStatus++
 				continue
 			}
-			if !d.Breakers.GetAccount(cred.ID).Allow(now) {
-				skippedBreaker++
+			if d.Breakers != nil {
+				if !d.Breakers.Get(spec.Provider).Allow(now) {
+					skippedBreaker++
+					continue
+				}
+				if !d.Breakers.GetAccount(cred.ID).Allow(now) {
+					skippedBreaker++
+					continue
+				}
+			}
+			maxConc := cred.MaxConcurrency
+			if cred.Domain == "deepseek_web" {
+				maxConc = 1
+			}
+			if d.Leases != nil {
+				capacity := identity.RuntimeCapacity{CredentialID: cred.ID, Domain: cred.Domain, Status: cred.Status, MaxConcurrency: maxConc}
+				if cred.CooldownUntil != nil {
+					capacity.CooldownUntil = *cred.CooldownUntil
+				}
+				d.Leases.Register(capacity)
+			}
+			// When a request is bound to a specific account, queue and wait for its slot
+			// so concurrent requests on the same account serialize instead of failing fast.
+			lease, err := d.acquireCredential(ctx, cred.ID, cred.Domain, req.Model, spec.TimeoutSec, isBoundSession)
+			if err != nil {
+				lastErr = err
 				continue
 			}
-		}
-		if d.Leases != nil {
-			capacity := identity.RuntimeCapacity{CredentialID: cred.ID, Domain: cred.Domain, Status: cred.Status, MaxConcurrency: cred.MaxConcurrency}
-			if cred.CooldownUntil != nil {
-				capacity.CooldownUntil = *cred.CooldownUntil
-			}
-			d.Leases.Register(capacity)
-		}
-		lease, err := d.acquireCredential(ctx, cred.ID, cred.Domain, req.Model, spec.TimeoutSec)
-		if err != nil {
-			lastErr = err
-			continue
-		}
 		secret, secretErr := d.Credentials.ReadSecret(ctx, cred.ID)
 		if secretErr != nil {
 			lastErr = fmt.Errorf("credential secret unavailable: %w", secretErr)
@@ -376,46 +388,57 @@ func (d *Dispatcher) streamChat(ctx context.Context, req provider.ChatRequest) (
 	if upstream, ok := d.sessionUpstream(req.SessionID); ok {
 		req.Upstream = upstream
 	}
-	creds, err = d.chatCredentials(creds, req.SessionID, spec.Provider)
-	if err != nil {
-		return nil, err
-	}
-	now := time.Now()
-	lastErr := error(ErrNoAvailableCredential)
-	skippedStatus, skippedBreaker := 0, 0
+		creds, err = d.chatCredentials(creds, req.SessionID, spec.Provider)
+		if err != nil {
+			return nil, err
+		}
+		isBoundSession := false
+		if d.Sessions != nil && strings.TrimSpace(req.SessionID) != "" {
+			if b, ok := d.Sessions.Get(req.SessionID); ok && b.Provider == spec.Provider {
+				isBoundSession = true
+			}
+		}
+		now := time.Now()
+		lastErr := error(ErrNoAvailableCredential)
+		skippedStatus, skippedBreaker := 0, 0
 		for _, cred := range creds {
 			cred = d.recoverCooldownIfExpired(ctx, cred, now)
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-		if (cred.Status != identity.StatusHealthy && cred.Status != identity.StatusDegraded) || (cred.CooldownUntil != nil && now.Before(*cred.CooldownUntil)) {
-			skippedStatus++
-			continue
-		}
-		if d.Breakers != nil {
-			if !d.Breakers.Get(spec.Provider).Allow(now) {
-				skippedBreaker++
+			if (cred.Status != identity.StatusHealthy && cred.Status != identity.StatusDegraded) || (cred.CooldownUntil != nil && now.Before(*cred.CooldownUntil)) {
+				skippedStatus++
 				continue
 			}
-			if !d.Breakers.GetAccount(cred.ID).Allow(now) {
-				skippedBreaker++
+			if d.Breakers != nil {
+				if !d.Breakers.Get(spec.Provider).Allow(now) {
+					skippedBreaker++
+					continue
+				}
+				if !d.Breakers.GetAccount(cred.ID).Allow(now) {
+					skippedBreaker++
+					continue
+				}
+			}
+			maxConc := cred.MaxConcurrency
+			if cred.Domain == "deepseek_web" {
+				maxConc = 1
+			}
+			if d.Leases != nil {
+				capacity := identity.RuntimeCapacity{CredentialID: cred.ID, Domain: cred.Domain, Status: cred.Status, MaxConcurrency: maxConc}
+				if cred.CooldownUntil != nil {
+					capacity.CooldownUntil = *cred.CooldownUntil
+				}
+				d.Leases.Register(capacity)
+			}
+			// P0-3: stream lease TTL tách khỏi TimeoutSec; wrapRelease Renew mỗi chunk
+			// nên sweep chỉ thu hồi stream treo. Release idempotent khi đã sweep.
+			// When session-bound, wait for this specific credential's slot.
+			lease, err := d.acquireStreamLease(ctx, cred.ID, req.Model, isBoundSession)
+			if err != nil {
+				lastErr = err
 				continue
 			}
-		}
-		if d.Leases != nil {
-			capacity := identity.RuntimeCapacity{CredentialID: cred.ID, Domain: cred.Domain, Status: cred.Status, MaxConcurrency: cred.MaxConcurrency}
-			if cred.CooldownUntil != nil {
-				capacity.CooldownUntil = *cred.CooldownUntil
-			}
-			d.Leases.Register(capacity)
-		}
-		// P0-3: stream lease TTL tách khỏi TimeoutSec; wrapRelease Renew mỗi chunk
-		// nên sweep chỉ thu hồi stream treo. Release idempotent khi đã sweep.
-		lease, err := d.acquireStreamLease(ctx, cred.ID, req.Model)
-		if err != nil {
-			lastErr = err
-			continue
-		}
 		secret, secretErr := d.Credentials.ReadSecret(ctx, cred.ID)
 		if secretErr != nil {
 			lastErr = fmt.Errorf("credential secret unavailable: %w", secretErr)
@@ -590,11 +613,11 @@ func (d *Dispatcher) Image(ctx context.Context, req provider.ImageRequest) (prov
 				continue
 			}
 		}
-		if d.Leases != nil {
-			d.Leases.Register(identity.RuntimeCapacity{CredentialID: cred.ID, Domain: cred.Domain, Status: cred.Status, MaxConcurrency: maxInt(cred.MaxConcurrency, 1)})
-		}
-		lease, leaseErr := d.acquireCredential(ctx, cred.ID, cred.Domain, req.Model, spec.TimeoutSec)
-		if leaseErr != nil {
+			if d.Leases != nil {
+				d.Leases.Register(identity.RuntimeCapacity{CredentialID: cred.ID, Domain: cred.Domain, Status: cred.Status, MaxConcurrency: maxInt(cred.MaxConcurrency, 1)})
+			}
+			lease, leaseErr := d.acquireCredential(ctx, cred.ID, cred.Domain, req.Model, spec.TimeoutSec, false)
+			if leaseErr != nil {
 			continue
 		}
 		secret, secretErr := d.Credentials.ReadSecret(ctx, cred.ID)
@@ -730,11 +753,11 @@ func (d *Dispatcher) Speech(ctx context.Context, req provider.SpeechRequest) ([]
 				continue
 			}
 		}
-		if d.Leases != nil {
-			d.Leases.Register(identity.RuntimeCapacity{CredentialID: cred.ID, Domain: cred.Domain, Status: identity.StatusHealthy, MaxConcurrency: maxInt(cred.MaxConcurrency, 1)})
-		}
-		lease, leaseErr := d.acquireCredential(ctx, cred.ID, cred.Domain, req.Model, spec.TimeoutSec)
-		if leaseErr != nil {
+			if d.Leases != nil {
+				d.Leases.Register(identity.RuntimeCapacity{CredentialID: cred.ID, Domain: cred.Domain, Status: identity.StatusHealthy, MaxConcurrency: maxInt(cred.MaxConcurrency, 1)})
+			}
+			lease, leaseErr := d.acquireCredential(ctx, cred.ID, cred.Domain, req.Model, spec.TimeoutSec, false)
+			if leaseErr != nil {
 			lastErr = leaseErr
 			continue
 		}
@@ -896,13 +919,16 @@ func classifyProviderError(err error, now time.Time) (identity.CredentialStatus,
 	}
 }
 
-func (d *Dispatcher) acquireCredential(ctx context.Context, credentialID, domain, model string, timeout int) (Lease, error) {
+func (d *Dispatcher) acquireCredential(ctx context.Context, credentialID, domain, model string, timeout int, wait bool) (Lease, error) {
 	if d.Leases == nil {
 		return Lease{}, fmt.Errorf("lease manager is not configured")
 	}
 	ttl := time.Duration(timeout) * time.Second
 	if ttl <= 0 {
 		ttl = 2 * time.Minute
+	}
+	if wait {
+		return d.Leases.AcquireCredentialWait(ctx, credentialID, model, ttl)
 	}
 	// P0-2/P1-3: non-blocking try per candidate; full slot fails fast with
 	// ErrNoCapacity so the loop moves to the next ordered credential instead
@@ -914,9 +940,12 @@ func (d *Dispatcher) acquireCredential(ctx context.Context, credentialID, domain
 }
 
 // acquireStreamLease separates stream lease TTL from request TimeoutSec (P0-3).
-func (d *Dispatcher) acquireStreamLease(ctx context.Context, credentialID, model string) (Lease, error) {
+func (d *Dispatcher) acquireStreamLease(ctx context.Context, credentialID, model string, wait bool) (Lease, error) {
 	if d.Leases == nil {
 		return Lease{}, fmt.Errorf("lease manager is not configured")
+	}
+	if wait {
+		return d.Leases.AcquireCredentialWait(ctx, credentialID, model, StreamLeaseTTL)
 	}
 	if lease, ok := d.tryAcquireFresh(ctx, credentialID, model, StreamLeaseTTL); ok {
 		return lease, nil

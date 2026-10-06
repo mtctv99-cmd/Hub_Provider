@@ -161,6 +161,35 @@ func (m *LeaseManager) AcquireCredential(ctx context.Context, credentialID, requ
 	return Lease{}, provider.ErrNoCapacity
 }
 
+// AcquireCredentialWait waits until the specified credential has capacity available,
+// or ctx is canceled/expired. Used for session-bound requests so that concurrent
+// requests targeting the same account queue and execute strictly one at a time.
+func (m *LeaseManager) AcquireCredentialWait(ctx context.Context, credentialID, requestID string, ttl time.Duration) (Lease, error) {
+	if ttl <= 0 {
+		ttl = 3 * time.Minute
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return Lease{}, err
+		}
+		m.mu.Lock()
+		lease, ok, canRetry := m.tryAcquireCredentialLocked(credentialID, requestID, ttl)
+		if ok {
+			m.mu.Unlock()
+			return lease, nil
+		}
+		m.mu.Unlock()
+		if !canRetry {
+			return Lease{}, provider.ErrNoCapacity
+		}
+		select {
+		case <-ctx.Done():
+			return Lease{}, ctx.Err()
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+}
+
 // Renew extends a live lease; false means it was already swept (P0-3).
 // Streams call it per chunk so the sweep only reaps stalled streams.
 func (m *LeaseManager) Renew(leaseID string, ttl time.Duration) bool {

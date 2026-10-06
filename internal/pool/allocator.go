@@ -40,72 +40,172 @@ func (a *Allocator) SetPriority(credentialID string, priority int) {
 	a.priorities[credentialID] = priority
 }
 
+func (a *Allocator) SetBorrowLimit(limit int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.borrowLimit = limit
+}
+
+// targetSessionCount calculates 40% of total credentials for the session pool.
+func targetSessionCount(total int) int {
+	if total <= 1 {
+		return 0
+	}
+	target := (total*4 + 5) / 10
+	if target < 1 {
+		target = 1
+	}
+	if target >= total {
+		target = total - 1
+	}
+	return target
+}
+
+// isExhausted reports whether every candidate in the pool is at max capacity.
+func isExhausted(candidates []Candidate) bool {
+	if len(candidates) == 0 {
+		return true
+	}
+	for _, c := range candidates {
+		limit := int32(c.Credential.MaxConcurrency)
+		if limit < 1 {
+			limit = 1
+		}
+		if c.Active < limit {
+			return false
+		}
+	}
+	return true
+}
+
 // Allocate applies W2A's 40/60 session/worker split while respecting explicit roles.
-// If the requested pool is exhausted, up to borrowLimit candidates from the other
-// pool may be returned as temporary borrows.
+// When regular worker pool is exhausted, idle session accounts (Active == 0) step in
+// to help handle worker traffic ("nếu rảnh thì qua chạy thường phụ").
 func (a *Allocator) Allocate(creds []identity.Credential, session bool) []Candidate {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	configured := make([]Candidate, 0, len(creds))
-	sessionCount := 0
-	workerCount := 0
+	if len(creds) == 0 {
+		return nil
+	}
+
+	targetRole := RoleWorker
+	if session {
+		targetRole = RoleSession
+	}
+
+	// Single credential: adapt to requested role.
+	if len(creds) == 1 {
+		c := creds[0]
+		p := 0
+		if a.priorities != nil {
+			p = a.priorities[c.ID]
+		}
+		role := Role(c.PoolRole)
+		if role == "" {
+			role = RoleAuto
+		}
+		return []Candidate{{Credential: c, Configured: role, Effective: targetRole, Active: c.ActiveLeases, Priority: p}}
+	}
+
+	// 1. Separate explicit roles from AUTO roles.
+	var explicitSession, explicitWorker []Candidate
+	var autoCandidates []Candidate
+
 	for _, c := range creds {
 		role := Role(c.PoolRole)
 		if role == "" {
 			role = RoleAuto
 		}
-		effective := role
-		if role == RoleAuto {
-			if session {
-				effective = RoleSession
-				sessionCount++
-			} else {
-				effective = RoleWorker
-				workerCount++
-			}
-		}
 		p := 0
 		if a.priorities != nil {
 			p = a.priorities[c.ID]
 		}
-		configured = append(configured, Candidate{Credential: c, Configured: role, Effective: effective, Active: c.ActiveLeases, Priority: p})
+		cand := Candidate{Credential: c, Configured: role, Active: c.ActiveLeases, Priority: p}
+		switch role {
+		case RoleSession:
+			cand.Effective = RoleSession
+			explicitSession = append(explicitSession, cand)
+		case RoleWorker:
+			cand.Effective = RoleWorker
+			explicitWorker = append(explicitWorker, cand)
+		default:
+			autoCandidates = append(autoCandidates, cand)
+		}
 	}
-	targetRole := RoleWorker
-	if session {
-		targetRole = RoleSession
+
+	// 2. Allocate 40% of accounts to Session, 60% to Worker.
+	targetSessions := targetSessionCount(len(creds))
+	neededSessions := targetSessions - len(explicitSession)
+	if neededSessions < 0 {
+		neededSessions = 0
 	}
-	preferred := make([]Candidate, 0, len(configured))
-	other := make([]Candidate, 0, len(configured))
-	for _, c := range configured {
-		if c.Effective == targetRole {
-			preferred = append(preferred, c)
+	if neededSessions > len(autoCandidates) {
+		neededSessions = len(autoCandidates)
+	}
+
+	// Sort AUTO candidates by Priority desc so higher priority accounts serve sessions.
+	sort.Slice(autoCandidates, func(i, j int) bool {
+		return autoCandidates[i].Priority > autoCandidates[j].Priority
+	})
+
+	var sessionPool, workerPool []Candidate
+	sessionPool = append(sessionPool, explicitSession...)
+	workerPool = append(workerPool, explicitWorker...)
+
+	for i, c := range autoCandidates {
+		if i < neededSessions {
+			c.Effective = RoleSession
+			sessionPool = append(sessionPool, c)
 		} else {
-			other = append(other, c)
+			c.Effective = RoleWorker
+			workerPool = append(workerPool, c)
 		}
 	}
-	// ponytail: sort Priority desc after ActiveLeases; upgrade to token quota balancer when quotas configured
-	sort.Slice(preferred, func(i, j int) bool {
-		if preferred[i].Active != preferred[j].Active {
-			return preferred[i].Active < preferred[j].Active
+
+	// 3. Determine preferred and other pools based on targetRole.
+	var preferred, other []Candidate
+	if targetRole == RoleSession {
+		preferred, other = sessionPool, workerPool
+	} else {
+		preferred, other = workerPool, sessionPool
+	}
+
+	// Sort candidates: least active leases first, then highest priority.
+	sortCandidates := func(cs []Candidate) {
+		sort.Slice(cs, func(i, j int) bool {
+			if cs[i].Active != cs[j].Active {
+				return cs[i].Active < cs[j].Active
+			}
+			return cs[i].Priority > cs[j].Priority
+		})
+	}
+	sortCandidates(preferred)
+	sortCandidates(other)
+
+	// 4. "nếu rảnh thì qua chạy thường phụ":
+	// When preferred pool is exhausted, borrow idle accounts (Active == 0) from the other pool.
+	if isExhausted(preferred) {
+		borrowLimit := a.borrowLimit
+		if borrowLimit <= 0 {
+			borrowLimit = 2
 		}
-		return preferred[i].Priority > preferred[j].Priority
-	})
-	sort.Slice(other, func(i, j int) bool {
-		if other[i].Active != other[j].Active {
-			return other[i].Active < other[j].Active
+		borrowed := make([]Candidate, 0, borrowLimit)
+		for _, c := range other {
+			if c.Active == 0 {
+				c.Effective = targetRole
+				borrowed = append(borrowed, c)
+				if len(borrowed) >= borrowLimit {
+					break
+				}
+			}
 		}
-		return other[i].Priority > other[j].Priority
-	})
-	if len(preferred) > 0 {
-		return preferred
+		if len(preferred) == 0 {
+			return borrowed
+		}
+		return append(preferred, borrowed...)
 	}
-	if len(other) > a.borrowLimit {
-		other = other[:a.borrowLimit]
-	}
-	for i := range other {
-		other[i].Effective = targetRole
-	}
-	return other
+
+	return preferred
 }
 
 func (a *Allocator) AllocateCredentials(creds []identity.Credential, session bool) []identity.Credential {
