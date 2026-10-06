@@ -36,9 +36,17 @@ func (h *Hub) Chat(ctx context.Context, req provider.ChatRequest) (provider.Chat
 	var text strings.Builder
 	var usage provider.Usage
 	terminal := false
+	rawBytes := 0
+	textFrames := 0
 	for event := range stream.Events {
 		if event.Type == "error" {
 			continue
+		}
+		if len(event.Raw) > 0 {
+			rawBytes += len(event.Raw)
+		}
+		if event.Delta != "" || event.Text != "" {
+			textFrames++
 		}
 		text.WriteString(event.Delta)
 		text.WriteString(event.Text)
@@ -57,13 +65,19 @@ func (h *Hub) Chat(ctx context.Context, req provider.ChatRequest) (provider.Chat
 	if streamErr, ok := <-stream.Err; ok && streamErr != nil {
 		return provider.ChatResponse{}, streamErr
 	}
-		if !terminal {
-			return provider.ChatResponse{}, errors.New("worker response ended without a terminal event")
+	if !terminal {
+		return provider.ChatResponse{}, errors.New("worker response ended without a terminal event")
+	}
+	// Diagnose before returning: distinguish a worker that emitted no text
+	// from one whose payload the parser could not extract. Counts only, no
+	// payload or credential material leaves this function.
+	if strings.TrimSpace(text.String()) == "" {
+		if textFrames > 0 || rawBytes > 0 {
+			return provider.ChatResponse{}, provider.NewEmptyResponseError(provider.EmptyReasonParserFailed, fmt.Sprintf("worker sent %d text frames (%d raw bytes) but extracted no text", textFrames, rawBytes))
 		}
-		if strings.TrimSpace(text.String()) == "" {
-			return provider.ChatResponse{}, errors.New("worker returned empty response content")
-		}
-		return provider.ChatResponse{ID: "chatcmpl-" + newRequestID(), Model: req.Model, Content: text.String(), Usage: usage}, nil
+		return provider.ChatResponse{}, provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, "worker completed without emitting text deltas")
+	}
+	return provider.ChatResponse{ID: "chatcmpl-" + newRequestID(), Model: req.Model, Content: text.String(), Usage: usage}, nil
 }
 
 func (h *Hub) chatStream(ctx context.Context, req provider.ChatRequest) (*Stream, error) {
@@ -90,11 +104,18 @@ func (h *Hub) StreamChat(ctx context.Context, req provider.ChatRequest) (<-chan 
 		defer close(out)
 		defer cancel()
 		terminal := false
+		var emittedText strings.Builder
+		emittedToolCalls := false
+		rawBytes := 0
 		for event := range stream.Events {
 			if event.Type == "error" {
 				continue
 			}
 			chunk := provider.StreamChunk{Content: event.Delta + event.Text}
+			if len(event.Raw) > 0 {
+				rawBytes += len(event.Raw)
+			}
+			emittedText.WriteString(chunk.Content)
 			if event.Type == "token_end" || event.Type == "job_result" || event.Done {
 				chunk.Done = true
 				terminal = true
@@ -107,9 +128,22 @@ func (h *Hub) StreamChat(ctx context.Context, req provider.ChatRequest) (<-chan 
 					chunk.Usage = &payload.Usage
 				}
 			}
+			if chunk.Done && strings.TrimSpace(emittedText.String()) == "" && !emittedToolCalls {
+				// Block empty Done turns before the dispatcher can commit the
+				// session: counts only, no payload or credential material.
+				reason := provider.EmptyReasonUpstreamEmpty
+				if rawBytes > 0 {
+					reason = provider.EmptyReasonParserFailed
+				}
+				chunk.Err = provider.NewEmptyResponseError(reason, fmt.Sprintf("worker stream completed without text content (raw_bytes=%d)", rawBytes))
+				chunk.Done = false
+			}
 			select {
 			case out <- chunk:
 			case <-ctx.Done():
+				return
+			}
+			if chunk.Done || chunk.Err != nil {
 				return
 			}
 		}
@@ -121,6 +155,15 @@ func (h *Hub) StreamChat(ctx context.Context, req provider.ChatRequest) (<-chan 
 		} else if !terminal {
 			select {
 			case out <- provider.StreamChunk{Err: fmt.Errorf("worker response ended without terminal event")}:
+			case <-ctx.Done():
+			}
+		} else if strings.TrimSpace(emittedText.String()) == "" && !emittedToolCalls {
+			reason := provider.EmptyReasonUpstreamEmpty
+			if rawBytes > 0 {
+				reason = provider.EmptyReasonParserFailed
+			}
+			select {
+			case out <- provider.StreamChunk{Err: provider.NewEmptyResponseError(reason, fmt.Sprintf("worker stream closed without text content (raw_bytes=%d)", rawBytes))}:
 			case <-ctx.Done():
 			}
 		}

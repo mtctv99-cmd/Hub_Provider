@@ -49,10 +49,12 @@ func (a *Account) UnmarshalJSON(data []byte) error {
 	return nil
 }
 type Session struct {
-	ConversationID string
-	ChatSessionID  string
-	InvocationID   int
-	TurnCount      int
+	ConversationID            string
+	ChatSessionID             string
+	InvocationID              int
+	TurnCount                 int
+	ConversationTransferToken string
+	TurnState                 string
 }
 type Adapter struct {
 	HTTPClient *http.Client
@@ -216,6 +218,14 @@ func BuildInvocationURL(tokenURL string, session *Session) (string, string, stri
 	return u.String(), conversationID, chatSessionID, nil
 }
 
+func socketDeadline(ctx context.Context, defaultTimeout time.Duration) time.Time {
+	deadline := time.Now().Add(defaultTimeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		return d
+	}
+	return deadline
+}
+
 func (a *Adapter) Chat(ctx context.Context, req provider.ChatRequest, credentialSecret []byte) (provider.ChatResponse, error) {
 	var account Account
 	if err := json.Unmarshal(credentialSecret, &account); err != nil || account.TokenURL == "" {
@@ -290,8 +300,7 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, cred
 			out <- provider.StreamChunk{Err: err}
 			return
 		}
-		fullText := buf.String()
-		cleanText, toolCalls := provider.ParseToolCalls(fullText)
+		cleanText, toolCalls := provider.ParseToolCalls(buf.String())
 		finishReason := "stop"
 		if len(toolCalls) > 0 {
 			finishReason = "tool_calls"
@@ -395,6 +404,12 @@ func (a *Adapter) generate(ctx context.Context, account Account, sess *Session, 
 	arg0["isStartOfSession"] = sess.InvocationID == 0
 	arg0["conversationId"] = convID
 	arg0["sessionId"] = chatID
+	if sess.ConversationTransferToken != "" {
+		arg0["conversationTransferToken"] = sess.ConversationTransferToken
+	}
+	if sess.TurnState != "" {
+		arg0["turnState"] = sess.TurnState
+	}
 	if clientInfo, ok := arg0["clientInfo"].(map[string]any); ok {
 		clientInfo["clientSessionId"] = chatID
 	}
@@ -418,11 +433,23 @@ func (a *Adapter) generate(ctx context.Context, account Account, sess *Session, 
 		return "", errors.New("copilot websocket connection failed")
 	}
 	defer ws.Close()
+	// DialContext only bounds the handshake; plain ReadMessage does not
+	// observe ctx. AfterFunc closes the socket on cancel; stop it on return
+	// so no goroutine outlives the request (no time.After leak).
+	stopCtx := context.AfterFunc(ctx, func() {
+		_ = ws.SetReadDeadline(time.Now())
+		_ = ws.Close()
+	})
+	defer stopCtx()
+	_ = ws.SetReadDeadline(socketDeadline(ctx, 60*time.Second))
 	if err := ws.WriteMessage(websocket.TextMessage, []byte(`{"protocol":"json","version":1}`+recordSeparator)); err != nil {
 		return "", errors.New("copilot protocol initialization failed")
 	}
 	_, _, err = ws.ReadMessage()
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
 		return "", errors.New("copilot handshake read failed")
 	}
 	if err := ws.WriteMessage(websocket.TextMessage, append(data, recordSeparator...)); err != nil {
@@ -430,14 +457,13 @@ func (a *Adapter) generate(ctx context.Context, account Account, sess *Session, 
 	}
 	var full strings.Builder
 	for {
+		_ = ws.SetReadDeadline(socketDeadline(ctx, 60*time.Second))
 		_, frame, err := ws.ReadMessage()
 		if err != nil {
-			if full.Len() > 0 {
-				if sess != nil {
-					sess.InvocationID++
-				}
-				return full.String(), nil
+			if ctx.Err() != nil {
+				return "", ctx.Err()
 			}
+			// Mid-stream socket cut is a truncated answer, never success.
 			return "", errors.New("copilot websocket read failed")
 		}
 		for _, raw := range strings.Split(string(frame), recordSeparator) {
@@ -487,9 +513,22 @@ func (a *Adapter) generate(ctx context.Context, account Account, sess *Session, 
 				}
 			}
 			if event.Type == 2 {
+				// Terminal frame: item.result decides success. Audit 2026-10-05:
+				// InvalidRequest arrives with empty bot text; returning ""
+				// with nil error hides it as HTTP 200 success.
+				value, message := terminalResult(event.Item)
+				if !isSuccessResult(value) {
+					return "", terminalError(value, message)
+				}
+				var transferToken any
+				var turnState any
+				botMessages := 0
+				botRawLen := 0
+				var botTexts []string
 				if item := event.Item; item != nil {
+					transferToken, _ = item["conversationTransferToken"]
+					turnState, _ = item["turnState"]
 					if msgs, ok := item["messages"].([]any); ok {
-						var botTexts []string
 						for _, m := range msgs {
 							if mObj, ok := m.(map[string]any); ok {
 								if mObj["author"] != "user" {
@@ -497,6 +536,8 @@ func (a *Adapter) generate(ctx context.Context, account Account, sess *Session, 
 										continue
 									}
 									if txt, ok := mObj["text"].(string); ok && txt != "" {
+										botMessages++
+										botRawLen += len(txt)
 										cleaned := cleanLoaderPrefix(txt)
 										if cleaned != "" {
 											botTexts = append(botTexts, cleaned)
@@ -516,6 +557,25 @@ func (a *Adapter) generate(ctx context.Context, account Account, sess *Session, 
 							}
 						}
 					}
+				}
+				// Block empty content before mutating the session: an empty
+				// turn must not advance invocation state or transfer tokens.
+				// Diagnose without tokens, URLs, or message text: counts only.
+				if strings.TrimSpace(full.String()) == "" {
+					switch {
+					case botMessages == 0:
+						return "", provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, "copilot bot generated no messages in terminal frame")
+					case botRawLen == 0:
+						return "", provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, "copilot bot sent messages with empty text (only loader or status)")
+					default:
+						return "", provider.NewEmptyResponseError(provider.EmptyReasonParserFailed, fmt.Sprintf("copilot bot sent %d messages (raw_len=%d) but cleaner extracted no text", botMessages, botRawLen))
+					}
+				}
+				if token, ok := transferToken.(string); ok {
+					captureTransferToken(sess, token)
+				}
+				if turnState != nil {
+					captureTurnState(sess, turnState)
 				}
 				if sess != nil {
 					sess.InvocationID++
@@ -606,11 +666,83 @@ func formatMessages(messages []provider.Message) string {
 }
 
 func sessionFromUpstream(upstream provider.UpstreamState) Session {
-	return Session{ConversationID: upstream.ConversationID, ChatSessionID: upstream.ChatSessionID, InvocationID: upstream.InvocationID}
+	return Session{ConversationID: upstream.ConversationID, ChatSessionID: upstream.ChatSessionID, InvocationID: upstream.InvocationID, ConversationTransferToken: upstream.ConversationTransferToken, TurnState: upstream.TurnState}
 }
 
 func upstreamFromSession(sess Session) provider.UpstreamState {
-	return provider.UpstreamState{ConversationID: sess.ConversationID, ChatSessionID: sess.ChatSessionID, InvocationID: sess.InvocationID}
+	return provider.UpstreamState{ConversationID: sess.ConversationID, ChatSessionID: sess.ChatSessionID, InvocationID: sess.InvocationID, ConversationTransferToken: sess.ConversationTransferToken, TurnState: sess.TurnState}
+}
+
+// terminalResult reads the type-2 completion status. Missing result on an
+// otherwise-closed turn is treated as empty (caller rejects empty Success).
+func terminalResult(item map[string]any) (value, message string) {
+	if item == nil {
+		return "", ""
+	}
+	raw, _ := item["result"].(map[string]any)
+	if raw == nil {
+		return "", ""
+	}
+	value, _ = raw["value"].(string)
+	message, _ = raw["message"].(string)
+	return strings.TrimSpace(value), strings.TrimSpace(message)
+}
+
+func isSuccessResult(value string) bool {
+	return strings.EqualFold(strings.TrimSpace(value), "Success") || value == ""
+}
+
+func terminalError(value, message string) error {
+	if value == "" {
+		return provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, "copilot terminal frame had no result value")
+	}
+	kind := "copilot upstream rejected request"
+	lower := strings.ToLower(value)
+	switch {
+	case strings.Contains(lower, "throttl") || strings.Contains(lower, "ratelimit") || strings.Contains(lower, "429"):
+		kind = "copilot upstream throttled request"
+	case strings.Contains(lower, "invalidrequest") || strings.Contains(lower, "invalid_request"):
+		kind = "copilot upstream rejected continuation"
+	}
+	if message != "" {
+		capped := message
+		if len(capped) > 300 {
+			capped = capped[:300]
+		}
+		return fmt.Errorf("%s (%s): %s", kind, value, capped)
+	}
+	return fmt.Errorf("%s (%s)", kind, value)
+}
+
+func isInvalidRequestError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "rejected continuation") || strings.Contains(msg, "invalidrequest") || strings.Contains(msg, "invalid_request")
+}
+
+func captureTransferToken(sess *Session, token string) {
+	if sess == nil || strings.TrimSpace(token) == "" || len(token) > 8192 {
+		return
+	}
+	sess.ConversationTransferToken = token
+}
+
+func captureTurnState(sess *Session, state any) {
+	if sess == nil {
+		return
+	}
+	switch v := state.(type) {
+	case string:
+		if v != "" && len(v) <= 32768 {
+			sess.TurnState = v
+		}
+	case map[string]any:
+		if data, err := json.Marshal(v); err == nil && len(data) <= 32768 {
+			sess.TurnState = string(data)
+		}
+	}
 }
 func mapTone(model string) string {
 	m := strings.ToLower(model)

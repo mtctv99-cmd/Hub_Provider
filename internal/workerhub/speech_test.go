@@ -3,6 +3,7 @@ package workerhub
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net/http/httptest"
 	"strings"
@@ -60,6 +61,61 @@ func TestSpeechProtocol(t *testing.T) {
 	}
 	if !hub.Available("piper:voice-a") {
 		t.Fatal("slot not released")
+	}
+}
+
+func TestDispatchHonorsPerModelConcurrency(t *testing.T) {
+	hub := New(Config{AuthToken: "test-secret", HeartbeatInterval: time.Hour})
+	defer hub.Close()
+	server := httptest.NewServer(httpHandler(hub))
+	defer server.Close()
+	conn := dialWorker(t, "ws"+server.URL[len("http"):], Registration{
+		WorkerID: "piper-cap", Model: "piper:voice-a", Models: []string{"piper:voice-a", "piper:voice-b"},
+		MaxConcurrency: 10, ModelConcurrency: map[string]int{"piper:voice-a": 1, "piper:voice-b": 2},
+	})
+	defer conn.Close()
+
+	_, err := hub.Dispatch(context.Background(), OutboundRequest{Model: "piper:voice-a", Type: "tts_request", Payload: map[string]string{"text": "first"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, firstMsg, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var firstRequest map[string]any
+	if err := json.Unmarshal(firstMsg, &firstRequest); err != nil {
+		t.Fatal(err)
+	}
+	firstID := firstRequest["request_id"].(string)
+
+	secondResult := make(chan *Stream, 1)
+	secondErr := make(chan error, 1)
+	go func() {
+		stream, dispatchErr := hub.Dispatch(context.Background(), OutboundRequest{Model: "piper:voice-a", Type: "tts_request", Payload: map[string]string{"text": "second"}})
+		if dispatchErr != nil {
+			secondErr <- dispatchErr
+			return
+		}
+		secondResult <- stream
+	}()
+	select {
+	case <-secondResult:
+		t.Fatal("second request passed the per-model concurrency limit")
+	case err := <-secondErr:
+		t.Fatal(err)
+	case <-time.After(75 * time.Millisecond):
+	}
+
+	if err := conn.WriteJSON(map[string]any{"type": "audio_result", "request_id": firstID, "audio_base64": "YQ==", "mime": "audio/wav", "done": true}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-secondErr:
+		t.Fatal(err)
+	case <-secondResult:
+	case <-time.After(time.Second):
+		t.Fatal("second request was not dispatched after a per-model slot became free")
 	}
 }
 

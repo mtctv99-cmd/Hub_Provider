@@ -48,7 +48,7 @@ func TestDispatcherSpeechUsesRemoteWorkerWithoutLocalModel(t *testing.T) {
 		err   error
 	}, 1)
 	go func() {
-		audio, mime, err := dispatcher.Speech(context.Background(), provider.SpeechRequest{Model: "piper:remote", Input: "hello", Voice: "remote"})
+		audio, mime, err := dispatcher.Speech(context.Background(), provider.SpeechRequest{Model: "piper:remote", Input: "hello", Voice: "piper:remote"})
 		result <- struct {
 			audio []byte
 			mime  string

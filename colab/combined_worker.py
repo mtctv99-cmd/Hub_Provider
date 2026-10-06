@@ -172,19 +172,29 @@ class VoiceLane:
             try:
                 if item is None:
                     return
-                msg, send = item
+                msg, send = item[:2]
+                enqueued_at = item[2] if len(item) > 2 else time.monotonic()
+                t0 = time.monotonic()
                 try:
-                    t0 = time.monotonic()
                     audio = self.voice.synthesize(msg['text'])
-                    dt = (time.monotonic() - t0) * 1000
+                    finished_at = time.monotonic()
+                    queue_ms = (t0 - enqueued_at) * 1000
+                    inference_ms = (finished_at - t0) * 1000
                     if not audio or len(audio) > 32 * 1024 * 1024:
                         raise ValueError('empty or oversized audio')
                     send(dict(type='audio_result', request_id=msg['request_id'], mime='audio/wav',
                               audio_base64=base64.b64encode(audio).decode('ascii'), done=True))
-                    LOG.info('[TTS] Voice %s completed %s in %.1fms (%d bytes)', self.name, msg['request_id'], dt, len(audio))
+                    LOG.info('[TTS] voice=%s request=%s chars=%d queue_ms=%.1f inference_ms=%.1f total_ms=%.1f bytes=%d',
+                             self.name, msg['request_id'], len(msg.get('text', '')), queue_ms,
+                             inference_ms, (finished_at - enqueued_at) * 1000, len(audio))
                 except Exception as exc:
-                    LOG.error('[TTS] Voice %s failed %s: %s', self.name, msg.get('request_id'), exc)
-                    send(dict(type='error', request_id=msg['request_id'], error=str(exc)))
+                    failed_at = time.monotonic()
+                    safe_error = re.sub(r'(?i)(bearer\s+|(?:token|secret|password|api[_-]?key)[=: ]+)[^\s,;]+', r'\1[REDACTED]', str(exc))[:240]
+                    LOG.error('[TTS] voice=%s request=%s chars=%d failed queue_ms=%.1f inference_ms=%.1f total_ms=%.1f error_type=%s error=%s',
+                              self.name, msg.get('request_id'), len(msg.get('text', '')),
+                              (t0 - enqueued_at) * 1000, (failed_at - t0) * 1000,
+                              (failed_at - enqueued_at) * 1000, type(exc).__name__, safe_error)
+                    send(dict(type='error', request_id=msg['request_id'], error=f'{type(exc).__name__}: {safe_error}'))
             finally:
                 self.jobs.task_done()
 

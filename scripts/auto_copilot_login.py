@@ -17,6 +17,53 @@ MASTER_KEY = bytes.fromhex("0123456789abcdef0123456789abcdef0123456789abcdef0123
 PROFILES_BASE = Path("/media/reup/Data_sv4/Sever_provider/data/profiles/copilot")
 PROFILES_BASE.mkdir(parents=True, exist_ok=True)
 
+def profile_source_ref(email: str) -> str:
+    safe_name = email.split("@")[0]
+    return f"browser_profile:{safe_name}"
+
+def token_expiry_unix(token_url: str):
+    """Decode JWT exp từ access_token. Trả về None nếu parse lỗi."""
+    try:
+        from urllib.parse import urlparse, parse_qs
+        import base64
+        q = parse_qs(urlparse(token_url).query)
+        raw = (q.get("access_token") or [""])[0]
+        parts = raw.split(".")
+        if len(parts) != 3:
+            return None
+        pad = "=" * (-len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(parts[1] + pad).decode("utf-8"))
+        exp = int(claims.get("exp", 0))
+        return exp or None
+    except Exception:
+        return None
+
+def needs_refresh(email: str, lead_sec: int = 3600) -> bool:
+    """True nếu token sắp hết hạn trong lead_sec. Không đọc được coi như cần refresh."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT id FROM identities WHERE lower(email) = ?", (email.lower(),))
+        row = c.fetchone()
+        if not row:
+            conn.close()
+            return True
+        cred_id = f"{row[0]}-copilot_ws"
+        c.execute("SELECT encrypted_payload, nonce FROM credential_secrets WHERE credential_id = ?", (cred_id,))
+        srow = c.fetchone()
+        conn.close()
+        if not srow:
+            return True
+        aesgcm = AESGCM(MASTER_KEY)
+        secret = json.loads(aesgcm.decrypt(srow[1], srow[0], None).decode("utf-8"))
+        exp = token_expiry_unix(secret.get("token_url", ""))
+        if exp is None:
+            return True
+        import time as _time
+        return exp - int(_time.time()) <= lead_sec
+    except Exception:
+        return True
+
 def save_to_db(email: str, token_url: str):
     aesgcm = AESGCM(MASTER_KEY)
     conn = sqlite3.connect(DB_PATH)
@@ -33,15 +80,19 @@ def save_to_db(email: str, token_url: str):
         """, (ident_id, email, email.lower()))
     
     cred_id = f"{ident_id}-copilot_ws"
+    # Gắn source_ref = thư mục profile Chrome của credential này để
+    # phục hồi liên kết account-profile (audit 2026-10-05: 6 source_ref rỗng).
+    source_ref = profile_source_ref(email)
     conn.execute("""
-        INSERT INTO credentials (id, identity_id, domain, status, max_concurrency, pool_role, last_error_kind, consecutive_errors)
-        VALUES (?, ?, 'copilot_ws', 'HEALTHY', 3, 'AUTO', '', 0)
+        INSERT INTO credentials (id, identity_id, domain, status, max_concurrency, source_ref, pool_role, last_error_kind, consecutive_errors)
+        VALUES (?, ?, 'copilot_ws', 'HEALTHY', 3, ?, 'AUTO', '', 0)
         ON CONFLICT(id) DO UPDATE SET
             status = 'HEALTHY',
+            source_ref = CASE WHEN excluded.source_ref <> '' THEN excluded.source_ref ELSE source_ref END,
             last_error_kind = '',
             consecutive_errors = 0,
             updated_at = CURRENT_TIMESTAMP
-    """, (cred_id, ident_id))
+    """, (cred_id, ident_id, source_ref))
     
     secret_data = json.dumps({"token_url": token_url}).encode("utf-8")
     nonce = os.urandom(12)
@@ -155,8 +206,27 @@ def login_account(email: str, password: str) -> bool:
         return False
 
 def main():
+    proactive = "--proactive" in sys.argv
+    lead_min = int(os.environ.get("REFRESH_LEAD_MIN", "60"))
+    lead_sec = lead_min * 60
+    targets = list(ACCOUNTS)
+    if proactive:
+        print(f"[*] Proactive mode: chỉ refresh token hết hạn trong {lead_min} phút tới")
+        skipped = []
+        kept = []
+        for email, _ in ACCOUNTS:
+            if needs_refresh(email, lead_sec):
+                kept.append(email)
+            else:
+                skipped.append(email)
+        for email in skipped:
+            print(f"[skip] token còn hạn > {lead_min}m: {email}")
+        targets = [(e, p) for e, p in ACCOUNTS if e in kept]
+        if not targets:
+            print("[*] Không có account nào cần refresh.")
+            return
     results = {}
-    for email, pwd in ACCOUNTS:
+    for email, pwd in targets:
         ok = login_account(email, pwd)
         results[email] = ok
         time.sleep(2)

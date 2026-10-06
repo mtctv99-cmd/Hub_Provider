@@ -20,14 +20,25 @@ type Candidate struct {
 	Configured Role
 	Effective  Role
 	Active     int32
+	Priority   int
 }
 
 type Allocator struct {
 	mu          sync.Mutex
 	borrowLimit int
+	priorities  map[string]int
 }
 
-func New() *Allocator { return &Allocator{borrowLimit: 2} }
+func New() *Allocator { return &Allocator{borrowLimit: 2, priorities: make(map[string]int)} }
+
+func (a *Allocator) SetPriority(credentialID string, priority int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.priorities == nil {
+		a.priorities = make(map[string]int)
+	}
+	a.priorities[credentialID] = priority
+}
 
 // Allocate applies W2A's 40/60 session/worker split while respecting explicit roles.
 // If the requested pool is exhausted, up to borrowLimit candidates from the other
@@ -53,7 +64,11 @@ func (a *Allocator) Allocate(creds []identity.Credential, session bool) []Candid
 				workerCount++
 			}
 		}
-		configured = append(configured, Candidate{Credential: c, Configured: role, Effective: effective, Active: c.ActiveLeases})
+		p := 0
+		if a.priorities != nil {
+			p = a.priorities[c.ID]
+		}
+		configured = append(configured, Candidate{Credential: c, Configured: role, Effective: effective, Active: c.ActiveLeases, Priority: p})
 	}
 	targetRole := RoleWorker
 	if session {
@@ -68,8 +83,19 @@ func (a *Allocator) Allocate(creds []identity.Credential, session bool) []Candid
 			other = append(other, c)
 		}
 	}
-	sort.Slice(preferred, func(i, j int) bool { return preferred[i].Active < preferred[j].Active })
-	sort.Slice(other, func(i, j int) bool { return other[i].Active < other[j].Active })
+	// ponytail: sort Priority desc after ActiveLeases; upgrade to token quota balancer when quotas configured
+	sort.Slice(preferred, func(i, j int) bool {
+		if preferred[i].Active != preferred[j].Active {
+			return preferred[i].Active < preferred[j].Active
+		}
+		return preferred[i].Priority > preferred[j].Priority
+	})
+	sort.Slice(other, func(i, j int) bool {
+		if other[i].Active != other[j].Active {
+			return other[i].Active < other[j].Active
+		}
+		return other[i].Priority > other[j].Priority
+	})
 	if len(preferred) > 0 {
 		return preferred
 	}

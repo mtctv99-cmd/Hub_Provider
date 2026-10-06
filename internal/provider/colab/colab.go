@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,7 +37,7 @@ func New(cfg Config) *Adapter {
 }
 func (a *Adapter) Name() string { return "google_colab" }
 func (a *Adapter) Capabilities() []provider.Capability {
-	return []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming}
+	return []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming, provider.CapabilityVision}
 }
 func (a *Adapter) Speech(context.Context, provider.SpeechRequest, []byte) ([]byte, string, error) {
 	return nil, "", provider.ErrCapabilityUnsupported
@@ -96,6 +97,13 @@ func (a *Adapter) Chat(ctx context.Context, req provider.ChatRequest, _ []byte) 
 		}
 		switch event["type"] {
 		case "job_result":
+			raw, _ := event["text"].(string)
+			if strings.TrimSpace(fmt.Sprint(event["text"])) == "" {
+				if raw == "" {
+					return provider.ChatResponse{}, provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, "colab worker job_result had no text")
+				}
+				return provider.ChatResponse{}, provider.NewEmptyResponseError(provider.EmptyReasonParserFailed, fmt.Sprintf("colab worker job_result text (len=%d) yielded empty content", len(raw)))
+			}
 			return provider.ChatResponse{ID: requestID, Model: req.Model, Content: fmt.Sprint(event["text"]), Usage: parseUsage(event["usage"])}, nil
 		case "error":
 			return provider.ChatResponse{}, errors.New(fmt.Sprint(event["error"]))
@@ -117,6 +125,7 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, _ []
 	go func() {
 		defer close(out)
 		defer conn.Close()
+		var emitted strings.Builder
 		for {
 			var event map[string]any
 			if err := conn.ReadJSON(&event); err != nil {
@@ -132,12 +141,24 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, _ []
 			}
 			switch event["type"] {
 			case "token":
-				out <- provider.StreamChunk{Content: fmt.Sprint(event["delta"])}
+				delta := fmt.Sprint(event["delta"])
+				emitted.WriteString(delta)
+				out <- provider.StreamChunk{Content: delta}
 			case "token_end":
+				if strings.TrimSpace(emitted.String()) == "" {
+					out <- provider.StreamChunk{Err: provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, "colab worker stream ended without text deltas")}
+					return
+				}
 				out <- provider.StreamChunk{Done: true, Usage: usagePtr(event["usage"])}
 				return
 			case "job_result":
-				out <- provider.StreamChunk{Content: fmt.Sprint(event["text"]), Done: true, Usage: usagePtr(event["usage"])}
+				rawText := fmt.Sprint(event["text"])
+				emitted.WriteString(rawText)
+				if strings.TrimSpace(emitted.String()) == "" {
+					out <- provider.StreamChunk{Err: provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, "colab worker stream job_result had no text")}
+					return
+				}
+				out <- provider.StreamChunk{Content: rawText, Done: true, Usage: usagePtr(event["usage"])}
 				return
 			case "error":
 				out <- provider.StreamChunk{Err: errors.New(fmt.Sprint(event["error"]))}

@@ -30,6 +30,12 @@ func (l *AuditLogger) Record(ctx context.Context, event AuditEvent) error {
 	if l == nil || l.db == nil {
 		return fmt.Errorf("audit logger unavailable")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// P0-7: detach khỏi request context để timeout/cancel không nuốt audit.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
 	detail := strings.TrimSpace(event.Detail)
 	if len(detail) > 1000 {
 		detail = detail[:1000]

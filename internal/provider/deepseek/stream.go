@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"regexp"
 	"strings"
@@ -16,6 +17,8 @@ var thinkClosePattern = regexp.MustCompile(`(?i)</\s*think\s*>`)
 // StreamParser phân tích SSE event stream từ DeepSeek Web API.
 type StreamParser struct {
 	ThinkingEnabled bool
+	MessageID       int64
+	hasContent      bool
 	ChatSessionID   string
 	currentType     string // "thinking" hoặc "text"
 	thinkingDone    bool
@@ -40,6 +43,17 @@ func (p *StreamParser) ParseStream(ctx context.Context, r io.Reader) <-chan prov
 	out := make(chan provider.StreamChunk, 32)
 	go func() {
 		defer close(out)
+		send := func(chunk provider.StreamChunk) bool {
+			if chunk.Done && !p.hasContent {
+				chunk = provider.StreamChunk{Err: fmt.Errorf("deepseek: empty completion")}
+			}
+			select {
+			case out <- chunk:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
 		scanner := bufio.NewScanner(r)
 		// Cho phép buffer lên tới 1MB cho payload lớn
 		buf := make([]byte, 64*1024)
@@ -48,7 +62,6 @@ func (p *StreamParser) ParseStream(ctx context.Context, r io.Reader) <-chan prov
 		for scanner.Scan() {
 			select {
 			case <-ctx.Done():
-				out <- provider.StreamChunk{Err: ctx.Err()}
 				return
 			default:
 			}
@@ -61,10 +74,12 @@ func (p *StreamParser) ParseStream(ctx context.Context, r io.Reader) <-chan prov
 			if strings.HasPrefix(line, "event:") {
 				evt := strings.TrimSpace(strings.TrimPrefix(line, "event:"))
 				if evt == "finish" || evt == "close" {
-					out <- provider.StreamChunk{
+					if !send(provider.StreamChunk{
 						Done:         true,
 						FinishReason: "stop",
-						Upstream:     provider.UpstreamState{ChatSessionID: p.ChatSessionID},
+						Upstream:     provider.UpstreamState{ChatSessionID: p.ChatSessionID, MessageID: p.MessageID},
+					}) {
+						return
 					}
 					return
 				}
@@ -77,39 +92,42 @@ func (p *StreamParser) ParseStream(ctx context.Context, r io.Reader) <-chan prov
 
 			dataStr := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 			if dataStr == "[DONE]" {
-				out <- provider.StreamChunk{
+				if !send(provider.StreamChunk{
 					Done:         true,
 					FinishReason: "stop",
-					Upstream:     provider.UpstreamState{ChatSessionID: p.ChatSessionID},
+					Upstream:     provider.UpstreamState{ChatSessionID: p.ChatSessionID, MessageID: p.MessageID},
+				}) {
+					return
 				}
 				return
 			}
 
 			chunks, done := p.parseDataChunk([]byte(dataStr))
 			for _, chunk := range chunks {
-				out <- chunk
+				if !send(chunk) {
+					return
+				}
 			}
 			if done {
-				out <- provider.StreamChunk{
+				if !send(provider.StreamChunk{
 					Done:         true,
 					FinishReason: "stop",
-					Upstream:     provider.UpstreamState{ChatSessionID: p.ChatSessionID},
+					Upstream:     provider.UpstreamState{ChatSessionID: p.ChatSessionID, MessageID: p.MessageID},
+				}) {
+					return
 				}
 				return
 			}
 		}
 
 		if err := scanner.Err(); err != nil && err != io.EOF {
-			out <- provider.StreamChunk{Err: err}
+			if !send(provider.StreamChunk{Err: err}) {
+				return
+			}
 			return
 		}
 
-		// Kết thúc stream mà chưa có explicit finish
-		out <- provider.StreamChunk{
-			Done:         true,
-			FinishReason: "stop",
-			Upstream:     provider.UpstreamState{ChatSessionID: p.ChatSessionID},
-		}
+		send(provider.StreamChunk{Err: io.ErrUnexpectedEOF})
 	}()
 	return out
 }
@@ -120,7 +138,22 @@ func (p *StreamParser) parseDataChunk(data []byte) ([]provider.StreamChunk, bool
 		return nil, false
 	}
 
+	if v, ok := raw["v"].(map[string]any); ok {
+		if response, ok := v["response"].(map[string]any); ok {
+			if id, ok := response["message_id"].(float64); ok {
+				p.MessageID = int64(id)
+			}
+		}
+		if id, ok := v["response_message_id"].(float64); ok {
+			p.MessageID = int64(id)
+		}
+	}
 	path, _ := raw["p"].(string)
+	if path == "response/message_id" {
+		if id, ok := raw["v"].(float64); ok {
+			p.MessageID = int64(id)
+		}
+	}
 	v, hasV := raw["v"]
 	if !hasV {
 		return nil, false
@@ -238,6 +271,9 @@ func (p *StreamParser) parseFragmentObj(fm map[string]any) []provider.StreamChun
 }
 
 func (p *StreamParser) emitText(text string) []provider.StreamChunk {
+	if text != "" {
+		p.hasContent = true
+	}
 	if text == "" {
 		return nil
 	}
@@ -255,26 +291,26 @@ func (p *StreamParser) emitText(text string) []provider.StreamChunk {
 			if before != "" {
 				res = append(res, provider.StreamChunk{
 					ReasoningContent: before,
-					Upstream:         provider.UpstreamState{ChatSessionID: p.ChatSessionID},
+					Upstream:         provider.UpstreamState{ChatSessionID: p.ChatSessionID, MessageID: p.MessageID},
 				})
 			}
 			if after != "" {
 				res = append(res, provider.StreamChunk{
 					Content:  after,
-					Upstream: provider.UpstreamState{ChatSessionID: p.ChatSessionID},
+					Upstream: provider.UpstreamState{ChatSessionID: p.ChatSessionID, MessageID: p.MessageID},
 				})
 			}
 			return res
 		}
 		return []provider.StreamChunk{{
 			ReasoningContent: text,
-			Upstream:         provider.UpstreamState{ChatSessionID: p.ChatSessionID},
+			Upstream:         provider.UpstreamState{ChatSessionID: p.ChatSessionID, MessageID: p.MessageID},
 		}}
 	}
 
 	return []provider.StreamChunk{{
 		Content:  text,
-		Upstream: provider.UpstreamState{ChatSessionID: p.ChatSessionID},
+		Upstream: provider.UpstreamState{ChatSessionID: p.ChatSessionID, MessageID: p.MessageID},
 	}}
 }
 

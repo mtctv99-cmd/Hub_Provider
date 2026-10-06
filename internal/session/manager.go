@@ -2,6 +2,7 @@ package session
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"sort"
 	"sync"
@@ -28,11 +29,16 @@ type Binding struct {
 	UpstreamConversationID string `json:"upstream_conversation_id,omitempty"`
 	UpstreamResponseID     string `json:"upstream_response_id,omitempty"`
 	UpstreamChoiceID       string `json:"upstream_choice_id,omitempty"`
-	UpstreamChatSessionID  string `json:"upstream_chat_session_id,omitempty"`
-	UpstreamInvocationID   int    `json:"upstream_invocation_id,omitempty"`
+	UpstreamChatSessionID              string `json:"upstream_chat_session_id,omitempty"`
+	UpstreamMessageID                  int64  `json:"upstream_message_id,omitempty"`
+	UpstreamInvocationID               int    `json:"upstream_invocation_id,omitempty"`
+	UpstreamConversationTransferToken string `json:"upstream_conversation_transfer_token,omitempty"`
+	UpstreamTurnState                 string `json:"upstream_turn_state,omitempty"`
 }
 
 type Manager struct {
+	db       *sql.DB
+	gates    map[string]*gate
 	mu       sync.Mutex
 	sessions map[string]Binding
 	maxTurns int
@@ -57,7 +63,7 @@ func (m *Manager) Bind(id, credentialID, provider string) (Binding, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := m.now()
-	if current, ok := m.sessions[id]; ok && now.Sub(current.LastActiveAt) <= m.idleTTL && current.Turns < m.maxTurns {
+	if current, ok := m.sessions[id]; ok && (m.db != nil || (now.Sub(current.LastActiveAt) <= m.idleTTL && current.Turns < m.maxTurns)) {
 		current.Turns++
 		current.LastActiveAt = now
 		m.sessions[id] = current
@@ -72,7 +78,7 @@ func (m *Manager) Get(id string) (Binding, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	b, ok := m.sessions[id]
-	if !ok || m.now().Sub(b.LastActiveAt) > m.idleTTL {
+	if !ok || (m.db == nil && m.now().Sub(b.LastActiveAt) > m.idleTTL) {
 		if ok {
 			delete(m.sessions, id)
 		}
@@ -96,7 +102,7 @@ func (m *Manager) SaveUpstreamState(id string, upstream provider.UpstreamState) 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	current, ok := m.sessions[id]
-	if !ok || m.now().Sub(current.LastActiveAt) > m.idleTTL {
+	if !ok || (m.db == nil && m.now().Sub(current.LastActiveAt) > m.idleTTL) {
 		return
 	}
 	if upstream.ConversationID != "" {
@@ -111,6 +117,15 @@ func (m *Manager) SaveUpstreamState(id string, upstream provider.UpstreamState) 
 	if upstream.ChatSessionID != "" {
 		current.UpstreamChatSessionID = upstream.ChatSessionID
 	}
+	if upstream.MessageID != 0 {
+		current.UpstreamMessageID = upstream.MessageID
+	}
+	if upstream.ConversationTransferToken != "" {
+		current.UpstreamConversationTransferToken = upstream.ConversationTransferToken
+	}
+	if upstream.TurnState != "" {
+		current.UpstreamTurnState = upstream.TurnState
+	}
 	if upstream.InvocationID != 0 {
 		current.UpstreamInvocationID = upstream.InvocationID
 	}
@@ -118,14 +133,24 @@ func (m *Manager) SaveUpstreamState(id string, upstream provider.UpstreamState) 
 	m.sessions[id] = current
 }
 
-func (m *Manager) Delete(id string) { m.mu.Lock(); delete(m.sessions, id); m.mu.Unlock() }
+func (m *Manager) Delete(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.db != nil {
+		if _, err := m.db.Exec(`DELETE FROM chat_session_bindings WHERE id=?`, id); err != nil {
+			return err
+		}
+	}
+	delete(m.sessions, id)
+	return nil
+}
 func (m *Manager) Sweep() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	n := 0
 	now := m.now()
 	for id, b := range m.sessions {
-		if now.Sub(b.LastActiveAt) > m.idleTTL {
+		if m.db == nil && now.Sub(b.LastActiveAt) > m.idleTTL {
 			delete(m.sessions, id)
 			n++
 		}

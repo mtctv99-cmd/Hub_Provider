@@ -17,6 +17,7 @@ import (
 
 	"sever_provider/internal/admin"
 	"sever_provider/internal/browser"
+	"sever_provider/internal/buildinfo"
 	"sever_provider/internal/colabsupervisor"
 	"sever_provider/internal/filestore"
 	"sever_provider/internal/identity"
@@ -71,6 +72,7 @@ type Handler struct {
 	TotalDurationMs atomic.Uint64
 	AITokens        atomic.Uint64
 	VoiceStats      sync.Map
+	probeLastNano   atomic.Int64
 }
 
 func NewHandler(dispatcher *scheduler.Dispatcher, models *scheduler.ModelRegistry) *Handler {
@@ -133,6 +135,10 @@ func (h *Handler) Ready(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
+	if r.URL.Query().Get("probe") != "" || r.URL.Query().Get("deep") != "" {
+		h.ReadyProbe(w, r)
+		return
+	}
 	if h == nil || h.Models == nil || h.Dispatcher == nil {
 		writeError(w, http.StatusServiceUnavailable, "server dependencies are not ready", "server_error", "dependencies_unready")
 		return
@@ -142,7 +148,62 @@ func (h *Handler) Ready(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "no models are configured", "server_error", "models_unready")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "models": len(models), "uptime_seconds": int(time.Since(h.StartedAt).Seconds())})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "version": buildinfo.Version, "models": len(models), "uptime_seconds": int(time.Since(h.StartedAt).Seconds())})
+}
+
+// ReadyProbe runs a read-only upstream health check via GeminiValidator.
+// Separate from Ready: rate-limited, never touches models/dispatcher.
+// Expected query: /ready?probe=gemini or /ready?deep=1 .
+func (h *Handler) ReadyProbe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	now := time.Now().UnixNano()
+	last := h.probeLastNano.Load()
+	// ponytail: fixed 10s window in memory. Upgrade to per-key quota when probe use grows.
+	if last != 0 && now-last < int64(10*time.Second) {
+		writeError(w, http.StatusTooManyRequests, "probe rate limit exceeded", "server_error", "probe_rate_limited")
+		return
+	}
+	if !h.probeLastNano.CompareAndSwap(last, now) {
+		writeError(w, http.StatusTooManyRequests, "probe rate limit exceeded", "server_error", "probe_rate_limited")
+		return
+	}
+	if h.GeminiValidator == nil {
+		writeError(w, http.StatusServiceUnavailable, "probe validator unavailable", "server_error", "probe_unavailable")
+		return
+	}
+	probeCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
+	defer cancel()
+
+	var cookie string
+	if reader, ok := h.Credentials.(interface {
+		ReadSecret(context.Context, string) ([]byte, error)
+	}); ok {
+		creds, _ := h.Credentials.List(probeCtx, "gemini_web")
+		for _, c := range creds {
+			if c.Status == identity.StatusDisabled || c.Status == identity.StatusAuthRequired {
+				continue
+			}
+			secretBytes, _ := reader.ReadSecret(probeCtx, c.ID)
+			var payload struct {
+				Cookie string `json:"cookie"`
+			}
+			if json.Unmarshal(secretBytes, &payload) == nil && strings.TrimSpace(payload.Cookie) != "" {
+				cookie = payload.Cookie
+				break
+			}
+		}
+	}
+	if cookie == "" {
+		cookie = "probe"
+	}
+	if err := h.GeminiValidator.ValidateCookie(probeCtx, cookie); err == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "probe": "gemini", "upstream": "healthy"})
+		return
+	}
+	writeError(w, http.StatusServiceUnavailable, "gemini upstream probe failed", "server_error", "probe_failed")
 }
 
 func (h *Handler) ModelsList(w http.ResponseWriter, r *http.Request) {
@@ -258,7 +319,15 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	chatReq := provider.ChatRequest{Model: req.Model, SessionID: r.Header.Get("X-Session-ID"), Messages: req.Messages, Tools: req.Tools, ToolChoice: req.ToolChoice, Stream: req.Stream, Temperature: req.Temperature, MaxTokens: req.MaxTokens}
+	sessionID := strings.TrimSpace(r.Header.Get("X-Session-ID"))
+	if len(sessionID) > 256 {
+		writeError(w, 400, "X-Session-ID is too long", "invalid_request_error", "invalid_session_id")
+		return
+	}
+	if sessionID != "" {
+		w.Header().Set("X-Session-ID", sessionID)
+	}
+	chatReq := provider.ChatRequest{Model: req.Model, SessionID: sessionID, Messages: req.Messages, Tools: req.Tools, ToolChoice: req.ToolChoice, Stream: req.Stream, Temperature: req.Temperature, MaxTokens: req.MaxTokens}
 	isWorkerModel := false
 	if spec, ok := h.Models.Get(req.Model); ok && spec.Provider == "google_colab" {
 		isWorkerModel = true
@@ -274,13 +343,13 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "Worker unavailable", "provider_error", "worker_unavailable")
 			return
 		}
-			resp, err := h.Workers.Chat(ctx, chatReq)
-			if err != nil {
-				log.Printf("[GATEWAY] colab chat failed: %v", err)
-				status, message, code := maskColabError(err)
-				writeError(w, status, message, "provider_error", code)
-				return
-			}
+		resp, err := h.Workers.Chat(ctx, chatReq)
+		if err != nil {
+			log.Printf("[GATEWAY] colab chat failed: %v", err)
+			status, message, code := maskColabError(err)
+			writeError(w, status, message, "provider_error", code)
+			return
+		}
 		if strings.TrimSpace(resp.Content) == "" && len(resp.ToolCalls) == 0 {
 			writeError(w, http.StatusBadGateway, "upstream worker returned empty response", "provider_error", "empty_response")
 			return
@@ -299,7 +368,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Stream {
-		h.streamChat(w, ctx, chatReq)
+		h.streamChat(w, ctx, chatReq, r.Header.Get("X-Request-ID"), started)
 		return
 	}
 	resp, err := h.Dispatcher.Chat(ctx, chatReq)
@@ -307,7 +376,30 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[GATEWAY] chat completion failed: %v", err)
 		status, userMsg, code := maskProviderError(err)
 		if h.AuditLog != nil {
-			_ = h.AuditLog.Record(ctx, admin.AuditEvent{
+			auditCtx, auditCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer auditCancel()
+			_ = h.AuditLog.Record(auditCtx, admin.AuditEvent{
+				RequestID: r.Header.Get("X-Request-ID"),
+				EventType: "chat_completion",
+				Model:     req.Model,
+				Latency:   time.Since(started),
+				ErrorKind: code,
+				Detail:    userMsg,
+			})
+		}
+		writeError(w, status, userMsg, "provider_error", code)
+		return
+	}
+	if strings.TrimSpace(resp.Content) == "" && strings.TrimSpace(resp.ReasoningContent) == "" && len(resp.ToolCalls) == 0 {
+		// Defensive guard: the dispatcher already rejects empty turns, but an
+		// adapter bypassing it must still surface empty_response instead of a
+		// false success audit and a 200 with empty content.
+		emptyErr := provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, "upstream completed with empty content")
+		status, userMsg, code := maskProviderError(emptyErr)
+		if h.AuditLog != nil {
+			auditCtx, auditCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer auditCancel()
+			_ = h.AuditLog.Record(auditCtx, admin.AuditEvent{
 				RequestID: r.Header.Get("X-Request-ID"),
 				EventType: "chat_completion",
 				Model:     req.Model,
@@ -325,7 +417,9 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		go func(tok int) { _ = h.Traffic.RecordMetrics(context.Background(), time.Now(), 0, int64(tok), 0) }(resp.Usage.TotalTokens)
 	}
 	if h.AuditLog != nil {
-		_ = h.AuditLog.Record(ctx, admin.AuditEvent{
+		auditCtx, auditCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer auditCancel()
+		_ = h.AuditLog.Record(auditCtx, admin.AuditEvent{
 			RequestID: r.Header.Get("X-Request-ID"),
 			EventType: "chat_completion",
 			Model:     req.Model,
@@ -341,16 +435,35 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, ChatCompletionResponse{ID: resp.ID, Object: "chat.completion", Created: time.Now().Unix(), Model: req.Model, Choices: []Choice{{Index: 0, Message: msg, FinishReason: &finish}}, Usage: resp.Usage})
 }
 
-func (h *Handler) streamChat(w http.ResponseWriter, ctx context.Context, req provider.ChatRequest) {
+func (h *Handler) streamChat(w http.ResponseWriter, ctx context.Context, req provider.ChatRequest, requestID string, started time.Time) {
+	ttftTimer := time.Now()
+	audit := func(errKind, detail string, ttft time.Duration) {
+		if h.AuditLog == nil {
+			return
+		}
+		if errKind == "" && detail == "success" {
+			detail = "ttft_ms=" + strconv.FormatInt(ttft.Milliseconds(), 10)
+		}
+		_ = h.AuditLog.Record(ctx, admin.AuditEvent{
+			RequestID: requestID,
+			EventType: "chat_completion_stream",
+			Model:     req.Model,
+			Latency:   time.Since(started),
+			ErrorKind: errKind,
+			Detail:    detail,
+		})
+	}
 	stream, err := h.Dispatcher.StreamChat(ctx, req)
 	if err != nil {
 		log.Printf("[GATEWAY] streaming chat failed: %v", err)
 		status, userMsg, code := maskProviderError(err)
+		audit(code, userMsg, time.Since(ttftTimer))
 		writeError(w, status, userMsg, "provider_error", code)
 		return
 	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
+		audit("streaming_unsupported", "streaming unsupported", time.Since(ttftTimer))
 		writeError(w, 500, "streaming unsupported", "server_error", "streaming_unsupported")
 		return
 	}
@@ -364,17 +477,31 @@ func (h *Handler) streamChat(w http.ResponseWriter, ctx context.Context, req pro
 	var streamReasoning strings.Builder
 	var streamToolCalls []provider.ToolCall
 	var streamUsage *provider.Usage
+	var ttft time.Duration
+	firstToken := true
 	for {
 		select {
 		case <-ctx.Done():
+			audit("request_cancelled", "request cancelled", ttft)
 			return
 		case chunk, ok := <-stream:
 			if !ok {
+				if strings.TrimSpace(streamContent.String()) == "" && strings.TrimSpace(streamReasoning.String()) == "" && len(streamToolCalls) == 0 {
+					// Defensive guard: the dispatcher converts empty streams to
+					// empty_response, but a channel close with no content must
+					// still audit and signal an error instead of [DONE].
+					emptyErr := provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, "upstream stream closed without text content or tool calls")
+					_, userMsg, code := maskProviderError(emptyErr)
+					send(ErrorEnvelope{Error: APIError{Message: userMsg, Type: "provider_error", Code: code}})
+					audit(code, userMsg, ttft)
+					return
+				}
 				toks := provider.ComputeUsage(req.Messages, req.Tools, streamContent.String(), streamReasoning.String(), streamToolCalls, streamUsage)
 				h.AITokens.Add(uint64(toks.TotalTokens))
 				if h.Traffic != nil && toks.TotalTokens > 0 {
 					go func(tok int) { _ = h.Traffic.RecordMetrics(context.Background(), time.Now(), 0, int64(tok), 0) }(toks.TotalTokens)
 				}
+				audit("", "success", ttft)
 				fmt.Fprint(w, "data: [DONE]\n\n")
 				flusher.Flush()
 				return
@@ -383,10 +510,15 @@ func (h *Handler) streamChat(w http.ResponseWriter, ctx context.Context, req pro
 				log.Printf("[GATEWAY] streaming provider error: %v", chunk.Err)
 				_, userMsg, code := maskProviderError(chunk.Err)
 				send(ErrorEnvelope{Error: APIError{Message: userMsg, Type: "provider_error", Code: code}})
+				audit(code, userMsg, ttft)
 				return
 			}
 			streamContent.WriteString(chunk.Content)
 			streamReasoning.WriteString(chunk.ReasoningContent)
+			if firstToken && (chunk.Content != "" || chunk.ReasoningContent != "" || len(chunk.ToolCalls) > 0) {
+				ttft = time.Since(ttftTimer)
+				firstToken = false
+			}
 			if len(chunk.ToolCalls) > 0 {
 				streamToolCalls = append(streamToolCalls, chunk.ToolCalls...)
 			}
@@ -403,11 +535,19 @@ func (h *Handler) streamChat(w http.ResponseWriter, ctx context.Context, req pro
 			}
 			send(ChatCompletionResponse{ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model, Choices: []Choice{{Index: 0, Delta: delta, FinishReason: finish}}, Usage: usageOrEmpty(chunk.Usage)})
 			if chunk.Done {
+				if strings.TrimSpace(streamContent.String()) == "" && strings.TrimSpace(streamReasoning.String()) == "" && len(streamToolCalls) == 0 {
+					emptyErr := provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, "upstream stream completed without text content or tool calls")
+					_, userMsg, code := maskProviderError(emptyErr)
+					send(ErrorEnvelope{Error: APIError{Message: userMsg, Type: "provider_error", Code: code}})
+					audit(code, userMsg, ttft)
+					return
+				}
 				toks := provider.ComputeUsage(req.Messages, req.Tools, streamContent.String(), streamReasoning.String(), streamToolCalls, streamUsage)
 				h.AITokens.Add(uint64(toks.TotalTokens))
 				if h.Traffic != nil && toks.TotalTokens > 0 {
 					go func(tok int) { _ = h.Traffic.RecordMetrics(context.Background(), time.Now(), 0, int64(tok), 0) }(toks.TotalTokens)
 				}
+				audit("", "success", ttft)
 				fmt.Fprint(w, "data: [DONE]\n\n")
 				flusher.Flush()
 				return
@@ -442,13 +582,17 @@ func (h *Handler) AudioSpeech(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[GATEWAY] speech synthesis failed: %v", err)
 		status, userMsg, code := maskProviderError(err)
 		if h.AuditLog != nil {
-			_ = h.AuditLog.Record(r.Context(), admin.AuditEvent{RequestID: r.Header.Get("X-Request-ID"), EventType: "speech", Model: req.Model, Latency: time.Since(started), ErrorKind: code, Detail: userMsg})
+			auditCtx, auditCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+			defer auditCancel()
+			_ = h.AuditLog.Record(auditCtx, admin.AuditEvent{RequestID: r.Header.Get("X-Request-ID"), EventType: "speech", Model: req.Model, Latency: time.Since(started), ErrorKind: code, Detail: userMsg})
 		}
 		writeError(w, status, userMsg, "provider_error", code)
 		return
 	}
 	if h.AuditLog != nil {
-		_ = h.AuditLog.Record(r.Context(), admin.AuditEvent{RequestID: r.Header.Get("X-Request-ID"), EventType: "speech", Model: req.Model, Latency: time.Since(started), Detail: "success"})
+		auditCtx, auditCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+		defer auditCancel()
+		_ = h.AuditLog.Record(auditCtx, admin.AuditEvent{RequestID: r.Header.Get("X-Request-ID"), EventType: "speech", Model: req.Model, Latency: time.Since(started), Detail: "success"})
 	}
 	w.Header().Set("Content-Type", mime)
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
@@ -494,7 +638,9 @@ func (h *Handler) Images(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[GATEWAY] image generation failed: %v", err)
 		status, userMsg, code := maskProviderError(err)
 		if h.AuditLog != nil {
-			_ = h.AuditLog.Record(r.Context(), admin.AuditEvent{
+			auditCtx, auditCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+			defer auditCancel()
+			_ = h.AuditLog.Record(auditCtx, admin.AuditEvent{
 				RequestID: r.Header.Get("X-Request-ID"),
 				EventType: "image_generation",
 				Model:     req.Model,
@@ -507,7 +653,9 @@ func (h *Handler) Images(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.AuditLog != nil {
-		_ = h.AuditLog.Record(r.Context(), admin.AuditEvent{
+		auditCtx, auditCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+		defer auditCancel()
+		_ = h.AuditLog.Record(auditCtx, admin.AuditEvent{
 			RequestID: r.Header.Get("X-Request-ID"),
 			EventType: "image_generation",
 			Model:     req.Model,
@@ -757,6 +905,9 @@ func maskProviderError(err error) (int, string, string) {
 	}
 	if strings.Contains(lower, "not configured") {
 		return http.StatusNotFound, "model is not configured", "model_not_found"
+	}
+	if errors.Is(err, provider.ErrEmptyResponse) || strings.Contains(lower, "empty_response") || strings.Contains(lower, "empty upstream response") || strings.Contains(lower, "empty response") {
+		return http.StatusBadGateway, "upstream provider returned empty response", "empty_response"
 	}
 	return http.StatusBadGateway, "upstream provider failed to complete request", "provider_unavailable"
 }

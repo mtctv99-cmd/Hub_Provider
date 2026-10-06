@@ -483,7 +483,7 @@ h2 { font-size: 22px; letter-spacing: -0.035em; color: #17202b; margin-bottom: 4
 .account-card:hover {
   border-color: var(--border-light);
 }
-.unified-account-card { padding: 12px 14px; }
+.unified-account-card { padding: 12px 14px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .account-card-main { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .account-primary-info { min-width: 0; }
 .account-email { margin: 0; color: #0f172a; font-size: 14px; font-weight: 750; overflow-wrap: anywhere; }

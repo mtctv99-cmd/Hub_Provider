@@ -28,8 +28,21 @@ func (a *Adapter) Chat(ctx context.Context, req provider.ChatRequest, secret []b
 		Cookie string `json:"cookie"`
 	}
 	_ = json.Unmarshal(secret, &cred)
-	cookie := cred.Cookie
-	if clean, err := SanitizeCookie(cookie); err == nil {
+	rawCookie := cred.Cookie
+	if rawCookie == "" && len(strings.TrimSpace(string(secret))) > 0 {
+		var s string
+		if json.Unmarshal(secret, &s) == nil {
+			rawCookie = s
+		} else {
+			rawCookie = string(secret)
+		}
+	}
+	var cookie string
+	if strings.TrimSpace(rawCookie) != "" {
+		clean, err := SanitizeCookie(rawCookie)
+		if err != nil {
+			return provider.ChatResponse{}, fmt.Errorf("gemini cookie: %w", err)
+		}
 		cookie = clean
 	}
 	a.syncTokenBaseURL()
@@ -58,6 +71,9 @@ func (a *Adapter) Chat(ctx context.Context, req provider.ChatRequest, secret []b
 			finishReason = "tool_calls"
 		}
 	}
+	if strings.TrimSpace(cleanText) == "" && len(toolCalls) == 0 {
+		return provider.ChatResponse{}, provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, "gemini chat returned empty content with no tool calls")
+	}
 	return provider.ChatResponse{
 		ID:           "gemini-" + strconv.FormatInt(time.Now().UnixNano(), 10),
 		Model:        req.Model,
@@ -77,8 +93,21 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, secr
 		Cookie string `json:"cookie"`
 	}
 	_ = json.Unmarshal(secret, &cred)
-	cookie := cred.Cookie
-	if clean, err := SanitizeCookie(cookie); err == nil {
+	rawCookie := cred.Cookie
+	if rawCookie == "" && len(strings.TrimSpace(string(secret))) > 0 {
+		var s string
+		if json.Unmarshal(secret, &s) == nil {
+			rawCookie = s
+		} else {
+			rawCookie = string(secret)
+		}
+	}
+	var cookie string
+	if strings.TrimSpace(rawCookie) != "" {
+		clean, err := SanitizeCookie(rawCookie)
+		if err != nil {
+			return nil, fmt.Errorf("gemini cookie: %w", err)
+		}
 		cookie = clean
 	}
 	model := req.Model
@@ -123,7 +152,8 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, secr
 	}
 	httpReq.Header.Set("x-goog-ext-525001261-jspb", `[1,null,null,null,"71c2d248d3b102ff"]`)
 
-	streamClient := &http.Client{Transport: a.Client.Transport}
+	streamTimeout := streamDeadline(a.Client)
+	streamClient := &http.Client{Transport: a.Client.Transport, Timeout: streamTimeout}
 	resp, err := streamClient.Do(httpReq)
 	if err != nil {
 		return nil, err
@@ -142,11 +172,14 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, secr
 		reader := bufio.NewReader(resp.Body)
 		var prevText string
 		var lastMeta ConversationMetadata
+		sawValidLine := false
+		sawValidEnd := false
 		for {
 			line, readErr := reader.ReadString('\n')
 			if line != "" {
 				text, meta, ok := ExtractResponseLine(line)
 				if ok {
+					sawValidLine = true
 					if meta.ConversationID != "" {
 						lastMeta = meta
 					}
@@ -158,6 +191,9 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, secr
 							delta = text
 						}
 						prevText = text
+						if strings.TrimSpace(text) != "" {
+							sawValidEnd = true
+						}
 						if delta != "" {
 							select {
 							case <-ctx.Done():
@@ -170,12 +206,28 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, secr
 				}
 			}
 			if readErr != nil {
-				if readErr != io.EOF && !strings.Contains(readErr.Error(), "context canceled") {
+				if readErr != io.EOF {
 					ch <- provider.StreamChunk{Err: readErr}
+					return
+				}
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					ch <- provider.StreamChunk{Err: ctxErr}
+					return
+				}
+				if !sawValidLine || !sawValidEnd {
+					if !sawValidLine {
+						ch <- provider.StreamChunk{Err: provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, "gemini stream ended without valid response frames")}
+					} else {
+						ch <- provider.StreamChunk{Err: provider.NewEmptyResponseError(provider.EmptyReasonParserFailed, "gemini stream had valid frames but extracted no end text")}
+					}
 					return
 				}
 				break
 			}
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			ch <- provider.StreamChunk{Err: ctxErr}
+			return
 		}
 		finishReason := "stop"
 		var toolCalls []provider.ToolCall
@@ -184,6 +236,14 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, secr
 			if len(toolCalls) > 0 {
 				finishReason = "tool_calls"
 			}
+		}
+		if strings.TrimSpace(prevText) == "" && len(toolCalls) == 0 {
+			if !sawValidLine {
+				ch <- provider.StreamChunk{Err: provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, "gemini stream ended without valid response frames")}
+			} else {
+				ch <- provider.StreamChunk{Err: provider.NewEmptyResponseError(provider.EmptyReasonParserFailed, "gemini stream had valid frames but extracted no text")}
+			}
+			return
 		}
 		ch <- provider.StreamChunk{
 			Done:         true,
@@ -227,6 +287,15 @@ func (a *Adapter) SetBaseURL(baseURL string) {
 	}
 }
 
+// streamDeadline keeps an explicit stream deadline instead of relying only on
+// the dispatcher's ctx. ponytail: 120s per-stream ceiling, tune when server models change.
+func streamDeadline(client *http.Client) time.Duration {
+	if client != nil && client.Timeout > 0 {
+		return client.Timeout
+	}
+	return 120 * time.Second
+}
+
 func (a *Adapter) syncTokenBaseURL() {
 	if a.Tokens == nil {
 		return
@@ -249,7 +318,11 @@ func (a *Adapter) GenerateWithFiles(ctx context.Context, prompt, model, cookie s
 	if err != nil {
 		return "", ConversationMetadata{}, err
 	}
-	return ExtractResponseText(raw), ExtractConversationMetadata(raw), nil
+	text := ExtractResponseText(raw)
+	if strings.TrimSpace(text) == "" {
+		return "", ConversationMetadata{}, DiagnoseEmptyResponse(raw)
+	}
+	return text, ExtractConversationMetadata(raw), nil
 }
 
 // generateRaw shares Gemini's token, payload, and StreamGenerate request path.
@@ -382,11 +455,11 @@ func (a *Adapter) ValidateCookie(ctx context.Context, cookie string) error {
 	if err != nil {
 		return fmt.Errorf("gemini cookie probe: %w", err)
 	}
-		if tokens.XSRF == "" || !tokens.Authenticated {
-			return ErrCookieInvalidOrExpired
-		}
-		return nil
+	if tokens.XSRF == "" || !tokens.Authenticated {
+		return ErrCookieInvalidOrExpired
 	}
+	return nil
+}
 
 func ParseToolCalls(text string) (string, []provider.ToolCall) {
 	return provider.ParseToolCalls(text)

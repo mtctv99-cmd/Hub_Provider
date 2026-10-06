@@ -17,6 +17,7 @@ type CopilotCredentialSpec struct {
 	Priority       int
 	MaxConcurrency int
 	PoolRole       PoolRole
+	SourceRef      string
 	Secret         []byte
 }
 
@@ -83,11 +84,12 @@ func (m *Manager) UpsertCopilotAccount(ctx context.Context, spec CopilotCredenti
 	if err != nil {
 		return IdentityDetail{}, err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO credentials(id, identity_id, domain, status, max_concurrency, pool_role, last_error_kind)
-		VALUES (?, ?, 'copilot_ws', ?, ?, ?, 'upstream_unverified')
+	_, err = tx.ExecContext(ctx, `INSERT INTO credentials(id, identity_id, domain, status, max_concurrency, source_ref, pool_role, last_error_kind)
+		VALUES (?, ?, 'copilot_ws', ?, ?, ?, ?, 'upstream_unverified')
 		ON CONFLICT(id) DO UPDATE SET status=excluded.status, max_concurrency=excluded.max_concurrency,
+			source_ref=CASE WHEN excluded.source_ref <> '' THEN excluded.source_ref ELSE source_ref END,
 			pool_role=excluded.pool_role, last_error_kind=excluded.last_error_kind, updated_at=CURRENT_TIMESTAMP`,
-		spec.CredentialID, spec.IdentityID, StatusDegraded, spec.MaxConcurrency, poolRoleOrAuto(spec.PoolRole))
+		spec.CredentialID, spec.IdentityID, StatusDegraded, spec.MaxConcurrency, spec.SourceRef, poolRoleOrAuto(spec.PoolRole))
 	if err != nil {
 		return IdentityDetail{}, err
 	}

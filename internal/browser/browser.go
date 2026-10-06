@@ -2,6 +2,7 @@ package browser
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,11 +32,28 @@ var (
 
 var profileIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 
+// AccountIDForEmail derives a deterministic profile ID from the normalized email,
+// avoiding the random `time.Now().Unix()%100000` profile churn that orphaned
+// existing profile dirs on every second login.
+
 func validateProfileID(accountID string) error {
 	if !profileIDPattern.MatchString(accountID) {
 		return ErrInvalidAccountID
 	}
 	return nil
+}
+
+func AccountIDForEmail(email string) string {
+	normalized := strings.ToLower(strings.TrimSpace(email))
+	if normalized == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(normalized))
+	id := make([]byte, 0, 8)
+	for _, b := range sum[:6] {
+		id = append(id, "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[int(b)%36])
+	}
+	return "Account-" + string(id)
 }
 
 func (m *Manager) profileDir(accountID string) (string, error) {
@@ -132,8 +150,11 @@ func (m *Manager) StartAutoLogin(accountID, targetURL string) (string, error) {
 		return "", err
 	}
 
+	if strings.Contains(accountID, "@") {
+		accountID = AccountIDForEmail(accountID)
+	}
 	if accountID == "" {
-		accountID = fmt.Sprintf("Account-%d", time.Now().Unix()%100000)
+		accountID = fmt.Sprintf("Account-%05d", time.Now().Unix()%100000)
 	}
 	if err := validateProfileID(accountID); err != nil {
 		m.running.Store(false)
@@ -285,6 +306,7 @@ func (m *Manager) monitorLogin(ctx context.Context, cmd *exec.Cmd, cdpPort int, 
 						continue
 					}
 				}
+				gracefulBrowserClose(cmd, cdpPort)
 				terminateBrowserProcess(cmd)
 				return
 			}
@@ -457,64 +479,53 @@ func captureCookiesViaCDP(cdpPort int, profileDir string) (cookieStr string, ema
 	return rawCookie, email, true
 }
 
-func (m *Manager) RefreshAccountFromProfile(accountID string) (string, error) {
-	if err := validateProfileID(accountID); err != nil {
-		return "", err
-	}
-	browserPath, err := m.FindBrowserPath()
-	if err != nil {
-		return "", err
-	}
-	profileDir, err := m.profileDir(accountID)
-	if err != nil {
-		return "", err
-	}
-	if _, err := os.Stat(profileDir); err != nil {
-		return "", fmt.Errorf("profile dir not found: %s", profileDir)
-	}
-
-	cdpPort, err := findFreePort()
-	if err != nil {
-		return "", err
-	}
-
-	cmd := exec.Command(browserPath,
-		"--headless=new",
-		fmt.Sprintf("--remote-debugging-port=%d", cdpPort),
-		"--remote-debugging-address=127.0.0.1",
-		"--user-data-dir="+profileDir,
-		"--no-first-run",
-		"--no-default-browser-check",
-		"--no-sandbox",
-		"--disable-gpu",
-		"--disable-dev-shm-usage",
-		"https://gemini.google.com/app",
-	)
-	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("start headless chrome: %w", err)
-	}
-	defer func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		cleanSingletonLocks(profileDir)
-	}()
-
-	var cookieStr string
-	var ok bool
-	for i := 0; i < 15; i++ {
-		time.Sleep(1 * time.Second)
-		cookieStr, _, ok = captureCookiesViaCDP(cdpPort, profileDir)
-		if ok && cookieStr != "" {
-			break
-		}
-	}
-	if !ok || cookieStr == "" {
-		return "", errors.New("unable to extract updated cookies from profile via CDP")
-	}
-	return cookieStr, nil
-}
-
 var emailPattern = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`)
+
+// gracefulBrowserClose asks Chrome/Edge to persist its profile (cookies, Preferences)
+// via Browser.close before falling back to kill. CDP endpoint is restricted to
+// the local debugging port of this login session.
+func gracefulBrowserClose(cmd *exec.Cmd, cdpPort int) bool {
+	if cdpPort <= 0 || cdpPort > 65535 {
+		return false
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/json/version", cdpPort))
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	var version struct {
+		URL string `json:"webSocketDebuggerUrl"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&version); err != nil {
+		return false
+	}
+	endpoint, err := url.Parse(version.URL)
+	if err != nil || endpoint.Scheme != "ws" || endpoint.Hostname() != "127.0.0.1" || endpoint.Port() != strconv.Itoa(cdpPort) {
+		return false
+	}
+	dialer := websocket.Dialer{HandshakeTimeout: 2 * time.Second}
+	conn, _, err := dialer.Dial(version.URL, nil)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+	if err := conn.WriteJSON(map[string]any{"id": 401, "method": "Browser.close"}); err != nil {
+		return false
+	}
+	if cmd == nil {
+		return true
+	}
+	wait := make(chan error, 1)
+	go func() { wait <- cmd.Wait() }()
+	select {
+	case <-wait:
+		return true
+	case <-time.After(5 * time.Second):
+		return false
+	}
+}
 
 func terminateBrowserProcess(cmd *exec.Cmd) {
 	if cmd == nil || cmd.Process == nil {

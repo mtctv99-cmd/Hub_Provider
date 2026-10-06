@@ -202,3 +202,43 @@ func TestCredentialSecretRoundTrip(t *testing.T) {
 		t.Fatalf("unexpected credential list: %+v", list)
 	}
 }
+
+func TestUpsertGoogleSecretNotOverwrittenWhenUndecryptable(t *testing.T) {
+	database, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	keyA := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	storeA, err := secret.NewStore(keyA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managerA := NewManager(database.DB, storeA)
+	account, err := managerA.UpsertGoogleAccount(context.Background(), "secret@example.com", 1, []GoogleCredentialSpec{{Domain: "gemini_web", Secret: []byte(`{"cookie":"original"}`)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	credID := account.Credentials[0].ID
+	keyB := "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	storeB, err := secret.NewStore(keyB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managerB := NewManager(database.DB, storeB)
+	if _, err := managerB.UpsertGoogleAccount(context.Background(), "secret@example.com", 1, []GoogleCredentialSpec{{ID: credID, Domain: "gemini_web", Status: StatusAuthRequired, Secret: []byte(`{"cookie":"new"}`)}}); err != nil {
+		t.Fatal(err)
+	}
+	// Old secret must remain readable with keyA (new write must not clobber it).
+	if secret, err := managerA.ReadSecret(context.Background(), credID); err != nil || string(secret) != `{"cookie":"original"}` {
+		t.Fatalf("original secret clobbered or unreadable: %q err=%v", string(secret), err)
+	}
+	// Credential status should reflect the caller-supplied Status, not forced HEALTHY.
+	creds, err := managerB.List(context.Background(), "gemini_web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(creds) != 1 || creds[0].Status != StatusAuthRequired {
+		t.Fatalf("expected caller-supplied status, got %+v", creds)
+	}
+}

@@ -60,6 +60,16 @@ func ValidateTokenURL(tokenURL string, minSeconds int64) (time.Time, error) {
 	return time.Unix(claims.Exp, 0).UTC(), nil
 }
 
+// TokenExpiresSoon reports whether the token expires within lead time.
+// Unparseable tokens return true so callers refresh conservatively.
+func TokenExpiresSoon(tokenURL string, lead time.Duration) bool {
+	exp, err := ValidateTokenURL(tokenURL, 0)
+	if err != nil {
+		return true
+	}
+	return time.Until(exp) <= lead
+}
+
 func decodeBase64URL(s string) ([]byte, error) {
 	s = strings.TrimRight(s, "=")
 	return base64.RawURLEncoding.DecodeString(s)

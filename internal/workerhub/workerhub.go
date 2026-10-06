@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"sever_provider/internal/provider"
 )
 
 const maxWorkerSlots = 32
@@ -45,24 +46,26 @@ type Config struct {
 
 // Registration describes the capabilities announced by a worker.
 type Registration struct {
-	WorkerID       string   `json:"worker_id"`
-	Model          string   `json:"model"`
-	Models         []string `json:"models,omitempty"`
-	Capabilities   []string `json:"capabilities,omitempty"`
-	MaxConcurrency int      `json:"max_concurrency"`
-	Token          string   `json:"token,omitempty"`
+	WorkerID         string         `json:"worker_id"`
+	Model            string         `json:"model"`
+	Models           []string       `json:"models,omitempty"`
+	ModelConcurrency map[string]int `json:"model_concurrency,omitempty"`
+	Capabilities     []string       `json:"capabilities,omitempty"`
+	MaxConcurrency   int            `json:"max_concurrency"`
+	Token            string         `json:"token,omitempty"`
 }
 
 // WorkerSnapshot is a point-in-time view of a connected worker.
 type WorkerSnapshot struct {
-	WorkerID       string    `json:"worker_id"`
-	Model          string    `json:"model"`
-	Models         []string  `json:"models,omitempty"`
-	Capabilities   []string  `json:"capabilities,omitempty"`
-	MaxConcurrency int       `json:"max_concurrency"`
-	Active         int       `json:"active"`
-	ConnectedAt    time.Time `json:"connected_at"`
-	LastSeen       time.Time `json:"last_seen"`
+	WorkerID         string         `json:"worker_id"`
+	Model            string         `json:"model"`
+	Models           []string       `json:"models,omitempty"`
+	ModelConcurrency map[string]int `json:"model_concurrency,omitempty"`
+	Capabilities     []string       `json:"capabilities,omitempty"`
+	MaxConcurrency   int            `json:"max_concurrency"`
+	Active           int            `json:"active"`
+	ConnectedAt      time.Time      `json:"connected_at"`
+	LastSeen         time.Time      `json:"last_seen"`
 }
 
 // Event is an event received from a worker for a request. Raw contains the
@@ -127,12 +130,13 @@ type worker struct {
 	conn *websocket.Conn
 	info WorkerSnapshot
 
-	mu      sync.Mutex
-	closed  bool
-	pending map[string]*pending
-	writeMu sync.Mutex
-	done    chan struct{}
-	once    sync.Once
+	mu           sync.Mutex
+	closed       bool
+	pending      map[string]*pending
+	activeModels map[string]int
+	writeMu      sync.Mutex
+	done         chan struct{}
+	once         sync.Once
 }
 
 // Session represents one registered worker connection.
@@ -265,11 +269,18 @@ func (h *Hub) register(conn *websocket.Conn, reg Registration) (*Session, error)
 	}
 	reg.MaxConcurrency = clampSlots(reg.MaxConcurrency)
 	reg.Models = normalizeModels(reg.Model, reg.Models)
+	modelConcurrency := make(map[string]int, len(reg.ModelConcurrency))
+	for model, slots := range reg.ModelConcurrency {
+		model = strings.TrimSpace(model)
+		if model != "" && slots > 0 && containsModel(reg.Models, model) {
+			modelConcurrency[model] = min(clampSlots(slots), reg.MaxConcurrency)
+		}
+	}
 	if reg.Model == "" && len(reg.Models) > 0 {
 		reg.Model = reg.Models[0]
 	}
 	now := time.Now()
-	w := &worker{hub: h, conn: conn, info: WorkerSnapshot{WorkerID: reg.WorkerID, Model: reg.Model, Models: append([]string(nil), reg.Models...), Capabilities: append([]string(nil), reg.Capabilities...), MaxConcurrency: reg.MaxConcurrency, ConnectedAt: now, LastSeen: now}, pending: make(map[string]*pending), done: make(chan struct{})}
+	w := &worker{hub: h, conn: conn, info: WorkerSnapshot{WorkerID: reg.WorkerID, Model: reg.Model, Models: append([]string(nil), reg.Models...), ModelConcurrency: modelConcurrency, Capabilities: append([]string(nil), reg.Capabilities...), MaxConcurrency: reg.MaxConcurrency, ConnectedAt: now, LastSeen: now}, pending: make(map[string]*pending), activeModels: make(map[string]int), done: make(chan struct{})}
 
 	h.mu.Lock()
 	if h.closed {
@@ -289,7 +300,7 @@ func (h *Hub) register(conn *websocket.Conn, reg Registration) (*Session, error)
 	if old != nil && old != w {
 		old.close(fmt.Errorf("worker %q replaced", targetID))
 	}
-	if err := w.send(map[string]any{"type": "registered", "worker_id": reg.WorkerID, "model": reg.Model, "max_concurrency": reg.MaxConcurrency}); err != nil {
+	if err := w.send(map[string]any{"type": "registered", "worker_id": reg.WorkerID, "model": reg.Model, "max_concurrency": reg.MaxConcurrency, "model_concurrency": modelConcurrency}); err != nil {
 		w.close(err)
 		return nil, err
 	}
@@ -337,36 +348,23 @@ func (h *Hub) Dispatch(ctx context.Context, req OutboundRequest) (*Stream, error
 		waitDeadline = d
 	}
 	for {
-		h.mu.RLock()
-		w := h.chooseLocked(req.Model)
-		hasWorker := false
-		if w == nil {
-			for _, item := range h.workers {
-				if !item.closed && item.canServe(req.Model) {
-					hasWorker = true
-					break
-				}
+		w, stream, hasWorker := h.reserve(req.Model, id)
+		if stream != nil {
+			if err := w.send(payload); err != nil {
+				w.failRequest(id, err)
+				return nil, err
 			}
+			go watchCancellation(ctx, w, id, stream)
+			return stream, nil
 		}
-		h.mu.RUnlock()
-		if w != nil {
-			w.mu.Lock()
-			if !w.closed && w.canServe(req.Model) && len(w.pending) < w.info.MaxConcurrency {
-				stream := newStream()
-				w.pending[id] = &pending{stream: stream, model: req.Model}
-				w.info.Active++
-				w.mu.Unlock()
-				if err := w.send(payload); err != nil {
-					w.failRequest(id, err)
-					return nil, err
-				}
-				go watchCancellation(ctx, w, id, stream)
-				return stream, nil
-			}
-			w.mu.Unlock()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
-		if !hasWorker || time.Now().After(waitDeadline) || ctx.Err() != nil {
-			break
+		if !hasWorker {
+			return nil, ErrNoWorker
+		}
+		if !time.Now().Before(waitDeadline) {
+			return nil, provider.ErrNoCapacity
 		}
 		select {
 		case <-ctx.Done():
@@ -374,7 +372,37 @@ func (h *Hub) Dispatch(ctx context.Context, req OutboundRequest) (*Stream, error
 		case <-time.After(15 * time.Millisecond):
 		}
 	}
-	return nil, ErrNoWorker
+
+}
+
+// reserve makes worker selection and slot ownership one atomic operation.
+func (h *Hub) reserve(model, id string) (*worker, *Stream, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return nil, nil, false
+	}
+	w := h.chooseLocked(model)
+	if w != nil {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		if !w.closed && w.hasCapacity(model) {
+			stream := newStream()
+			w.pending[id] = &pending{stream: stream, model: model}
+			w.info.Active++
+			w.activeModels[model]++
+			return w, stream, true
+		}
+	}
+	for _, item := range h.workers {
+		item.mu.Lock()
+		available := !item.closed && item.canServe(model)
+		item.mu.Unlock()
+		if available {
+			return nil, nil, true
+		}
+	}
+	return nil, nil, false
 }
 
 func (h *Hub) chooseLocked(model string) *worker {
@@ -382,7 +410,7 @@ func (h *Hub) chooseLocked(model string) *worker {
 	chosenActive, chosenID := 0, ""
 	for _, w := range h.workers {
 		w.mu.Lock()
-		available := !w.closed && w.canServe(model) && w.info.Active < w.info.MaxConcurrency
+		available := !w.closed && w.canServe(model) && w.hasCapacity(model)
 		active, id := w.info.Active, w.info.WorkerID
 		w.mu.Unlock()
 		if !available {
@@ -482,11 +510,33 @@ func (w *worker) canServe(model string) bool {
 	return w.info.Model == model
 }
 
+func (w *worker) hasCapacity(model string) bool {
+	if w.info.Active >= w.info.MaxConcurrency {
+		return false
+	}
+	if limit, ok := w.info.ModelConcurrency[model]; ok && w.activeModels[model] >= limit {
+		return false
+	}
+	return true
+}
+
+func (w *worker) releaseModel(model string) {
+	if w.activeModels[model] > 1 {
+		w.activeModels[model]--
+	} else {
+		delete(w.activeModels, model)
+	}
+}
+
 func (w *worker) snapshot() WorkerSnapshot {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	copy := w.info
 	copy.Models = append([]string(nil), w.info.Models...)
+	copy.ModelConcurrency = make(map[string]int, len(w.info.ModelConcurrency))
+	for model, slots := range w.info.ModelConcurrency {
+		copy.ModelConcurrency[model] = slots
+	}
 	copy.Capabilities = append([]string(nil), w.info.Capabilities...)
 	return copy
 }
@@ -576,6 +626,7 @@ func (w *worker) handleEvent(envelope map[string]json.RawMessage, typ string) {
 	terminal := typ == "token_end" || typ == "job_result" || typ == "audio_result" || typ == "error" || rawBool(envelope["done"])
 	if terminal {
 		delete(w.pending, id)
+		w.releaseModel(p.model)
 		if w.info.Active > 0 {
 			w.info.Active--
 		}
@@ -592,6 +643,7 @@ func (w *worker) handleEvent(envelope map[string]json.RawMessage, typ string) {
 	default:
 		if !terminal {
 			delete(w.pending, id)
+			w.releaseModel(p.model)
 			w.info.Active--
 		}
 		p.stream.finish(errors.New("worker response buffer full"))
@@ -611,6 +663,7 @@ func (w *worker) failRequest(id string, err error) {
 	p := w.pending[id]
 	if p != nil {
 		delete(w.pending, id)
+		w.releaseModel(p.model)
 		if w.info.Active > 0 {
 			w.info.Active--
 		}
@@ -626,6 +679,7 @@ func (w *worker) cancelRequest(id string) {
 	p := w.pending[id]
 	if p != nil {
 		delete(w.pending, id)
+		w.releaseModel(p.model)
 		if w.info.Active > 0 {
 			w.info.Active--
 		}
@@ -655,6 +709,7 @@ func (w *worker) close(err error) {
 			delete(w.pending, id)
 			pending = append(pending, p)
 		}
+		w.activeModels = make(map[string]int)
 		w.info.Active = 0
 		close(w.done)
 		w.mu.Unlock()
@@ -718,6 +773,15 @@ func normalizeModels(model string, models []string) []string {
 		}
 	}
 	return out
+}
+
+func containsModel(models []string, target string) bool {
+	for _, model := range models {
+		if model == target {
+			return true
+		}
+	}
+	return false
 }
 
 func clampSlots(n int) int {

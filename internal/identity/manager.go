@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -29,10 +30,18 @@ type GoogleCredentialSpec struct {
 	PoolRole       PoolRole
 	MaxConcurrency int
 	Secret         []byte
+	// Status overrides the default StatusHealthy for protected flows
+	// (e.g. credentials restored but not yet validated upstream).
+	Status CredentialStatus
 }
 
 // UpsertGoogleAccount reuses an identity by normalized email and attaches
 // provider-specific encrypted credentials without duplicating accounts.
+//
+// Hysteresis: credentials whose only change is the status will not overwrite an
+// existing credential secret. This protects un-decryptable-but-real Google
+// secrets from being silently overwritten by an encryption under a different
+// (e.g. ephemeral) MASTER_KEY, see P0-1.
 func (m *Manager) UpsertGoogleAccount(ctx context.Context, email string, priority int, specs []GoogleCredentialSpec) (IdentityDetail, error) {
 	email = strings.TrimSpace(email)
 	if normalizeEmail(email) == "" {
@@ -81,6 +90,9 @@ func (m *Manager) UpsertGoogleAccount(ctx context.Context, email string, priorit
 		if spec.MaxConcurrency < 1 {
 			spec.MaxConcurrency = 1
 		}
+		if spec.Status == "" {
+			spec.Status = StatusHealthy
+		}
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO credentials(id, identity_id, domain, status, max_concurrency, source_ref, fingerprint, pool_role, last_error_kind)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -94,11 +106,26 @@ func (m *Manager) UpsertGoogleAccount(ctx context.Context, email string, priorit
 				pool_role=excluded.pool_role,
 				last_error_kind=excluded.last_error_kind,
 				updated_at=CURRENT_TIMESTAMP`,
-			spec.ID, identity.ID, spec.Domain, StatusHealthy, spec.MaxConcurrency, spec.SourceRef, spec.Fingerprint, poolRoleOrAuto(spec.PoolRole), "")
+			spec.ID, identity.ID, spec.Domain, spec.Status, spec.MaxConcurrency, spec.SourceRef, spec.Fingerprint, poolRoleOrAuto(spec.PoolRole), "")
 		if err != nil {
 			return IdentityDetail{}, fmt.Errorf("upsert credential: %w", err)
 		}
 		if len(spec.Secret) > 0 {
+			if m.secretStore == nil {
+				log.Printf(`[identity] skip secret upsert for credential %s: secret store unavailable; existing DB secret kept`, spec.ID)
+				continue
+			}
+			var existingPayload, existingNonce []byte
+			scanErr := tx.QueryRowContext(ctx, `SELECT encrypted_payload, nonce FROM credential_secrets WHERE credential_id=?`, spec.ID).Scan(&existingPayload, &existingNonce)
+			if scanErr == nil {
+				// Existing secret found in DB. Test if it can be decrypted with the current MASTER_KEY.
+				if _, decErr := m.secretStore.Decrypt(existingPayload, existingNonce); decErr != nil {
+					// Existing secret cannot be decrypted with current key!
+					// Do NOT automatically create a new ciphertext overwriting the old secret (P0-1).
+					log.Printf("[WARNING] credential %s has existing Google secret that cannot be decrypted with current MASTER_KEY: %v; refusing to overwrite stored ciphertext", spec.ID, decErr)
+					continue
+				}
+			}
 			payload, nonce, encErr := m.secretStore.Encrypt(spec.Secret)
 			if encErr != nil {
 				return IdentityDetail{}, fmt.Errorf("encrypt credential secret: %w", encErr)

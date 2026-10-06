@@ -132,9 +132,9 @@ func TestClientSendPromptAutoPow(t *testing.T) {
 			// Calculate target hash for answer 12
 			salt := "salttest"
 			expireAt := int64(1800000000)
-				prefix := pow.BuildPrefix(salt, expireAt)
-				h := pow.DeepSeekHashV1([]byte(prefix + "12"))
-				target := hex.EncodeToString(h[:])
+			prefix := pow.BuildPrefix(salt, expireAt)
+			h := pow.DeepSeekHashV1([]byte(prefix + "12"))
+			target := hex.EncodeToString(h[:])
 
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"code": 0,
@@ -165,7 +165,7 @@ func TestClientSendPromptAutoPow(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, &http.Client{Timeout: 5 * time.Second})
-		resp, sessID, err := c.SendPrompt(context.Background(), "token-1", "", "Hi DeepSeek", false, false)
+	resp, sessID, err := c.SendPrompt(context.Background(), "token-1", "", "Hi DeepSeek", false, false)
 	if err != nil {
 		t.Fatalf("SendPrompt failed: %v", err)
 	}

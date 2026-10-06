@@ -221,7 +221,7 @@ func (a *Adapter) Chat(ctx context.Context, req provider.ChatRequest, credential
 		return provider.ChatResponse{}, errors.New("deepseek: circuit breaker open")
 	}
 
-	token, credSessionID, err := parseCredentialSecret(credentialSecret)
+	token, _, err := parseCredentialSecret(credentialSecret)
 	if err != nil {
 		return provider.ChatResponse{}, fmt.Errorf("deepseek parse credential: %w", err)
 	}
@@ -230,9 +230,6 @@ func (a *Adapter) Chat(ctx context.Context, req provider.ChatRequest, credential
 	}
 
 	sessionID := req.Upstream.ChatSessionID
-	if sessionID == "" {
-		sessionID = credSessionID
-	}
 
 	prompt := provider.FormatPromptWithTools(req.Messages, req.Tools, req.ToolChoice)
 	thinkingEnabled := isReasonerModel(req.Model)
@@ -241,7 +238,7 @@ func (a *Adapter) Chat(ctx context.Context, req provider.ChatRequest, credential
 	a.AcquireLease()
 	defer a.ReleaseLease()
 
-	resp, chatSessionID, err := a.Client.SendPrompt(ctx, token, sessionID, prompt, thinkingEnabled, searchEnabled)
+	resp, chatSessionID, err := a.Client.SendPromptWithParent(ctx, token, sessionID, prompt, thinkingEnabled, searchEnabled, req.Upstream.MessageID)
 	if err != nil {
 		a.Breaker.RecordFailure(err)
 		return provider.ChatResponse{}, err
@@ -253,12 +250,14 @@ func (a *Adapter) Chat(ctx context.Context, req provider.ChatRequest, credential
 
 	var contentBuilder strings.Builder
 	var reasoningBuilder strings.Builder
+	seenChunks := 0
 
 	for chunk := range stream {
 		if chunk.Err != nil {
 			a.Breaker.RecordFailure(chunk.Err)
 			return provider.ChatResponse{}, chunk.Err
 		}
+		seenChunks++
 		if chunk.Content != "" {
 			contentBuilder.WriteString(chunk.Content)
 		}
@@ -267,6 +266,22 @@ func (a *Adapter) Chat(ctx context.Context, req provider.ChatRequest, credential
 		}
 	}
 
+	if ctx.Err() != nil {
+		return provider.ChatResponse{}, ctx.Err()
+	}
+	// Diagnose before recording success: distinguish an upstream that sent
+	// nothing from an SSE payload the parser could not extract. Counts only,
+	// no token, prompt, or message content leaves this function.
+	if contentBuilder.Len() == 0 && reasoningBuilder.Len() == 0 {
+		var err error
+		if seenChunks > 0 {
+			err = provider.NewEmptyResponseError(provider.EmptyReasonParserFailed, fmt.Sprintf("deepseek SSE had %d chunks but extracted no content", seenChunks))
+		} else {
+			err = provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, "deepseek SSE stream ended without chunks")
+		}
+		a.Breaker.RecordFailure(err)
+		return provider.ChatResponse{}, err
+	}
 	a.Breaker.RecordSuccess()
 
 	fullContent := contentBuilder.String()
@@ -288,7 +303,7 @@ func (a *Adapter) Chat(ctx context.Context, req provider.ChatRequest, credential
 		ReasoningContent: reasoningBuilder.String(),
 		ToolCalls:        toolCalls,
 		FinishReason:     finishReason,
-		Upstream:         provider.UpstreamState{ChatSessionID: chatSessionID},
+		Upstream:         provider.UpstreamState{ChatSessionID: chatSessionID, MessageID: parser.MessageID},
 	}, nil
 }
 
@@ -298,7 +313,7 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, cred
 		return nil, errors.New("deepseek: circuit breaker open")
 	}
 
-	token, credSessionID, err := parseCredentialSecret(credentialSecret)
+	token, _, err := parseCredentialSecret(credentialSecret)
 	if err != nil {
 		return nil, fmt.Errorf("deepseek parse credential: %w", err)
 	}
@@ -307,9 +322,6 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, cred
 	}
 
 	sessionID := req.Upstream.ChatSessionID
-	if sessionID == "" {
-		sessionID = credSessionID
-	}
 
 	prompt := provider.FormatPromptWithTools(req.Messages, req.Tools, req.ToolChoice)
 	thinkingEnabled := isReasonerModel(req.Model)
@@ -317,7 +329,7 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, cred
 
 	a.AcquireLease()
 
-	resp, chatSessionID, err := a.Client.SendPrompt(ctx, token, sessionID, prompt, thinkingEnabled, searchEnabled)
+	resp, chatSessionID, err := a.Client.SendPromptWithParent(ctx, token, sessionID, prompt, thinkingEnabled, searchEnabled, req.Upstream.MessageID)
 	if err != nil {
 		a.ReleaseLease()
 		a.Breaker.RecordFailure(err)
@@ -337,10 +349,16 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, cred
 		hasTools := len(req.Tools) > 0 && req.ToolChoice != "none"
 
 		if !hasTools {
+			seenChunks := 0
+			var emitted strings.Builder
 			for chunk := range stream {
 				if chunk.Err != nil {
 					hasError = true
 					a.Breaker.RecordFailure(chunk.Err)
+				} else {
+					seenChunks++
+					emitted.WriteString(chunk.Content)
+					emitted.WriteString(chunk.ReasoningContent)
 				}
 				select {
 				case out <- chunk:
@@ -348,7 +366,23 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, cred
 					return
 				}
 			}
+			// Block empty streams before recording success: a stream with no
+			// extractable content must fail instead of a silent success.
 			if !hasError {
+				if strings.TrimSpace(emitted.String()) == "" {
+					var emptyErr error
+					if seenChunks > 0 {
+						emptyErr = provider.NewEmptyResponseError(provider.EmptyReasonParserFailed, fmt.Sprintf("deepseek stream had %d chunks but extracted no content", seenChunks))
+					} else {
+						emptyErr = provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, "deepseek stream ended without chunks")
+					}
+					a.Breaker.RecordFailure(emptyErr)
+					select {
+					case out <- provider.StreamChunk{Err: emptyErr}:
+					case <-ctx.Done():
+					}
+					return
+				}
 				a.Breaker.RecordSuccess()
 			}
 			return
@@ -385,12 +419,22 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, cred
 			}
 		}
 
+		fullText := contentBuf.String()
+		cleanText, toolCalls := provider.ParseToolCalls(fullText)
+
+		if strings.TrimSpace(cleanText) == "" && len(toolCalls) == 0 {
+			emptyErr := provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, "deepseek tool stream ended without content or tool calls")
+			a.Breaker.RecordFailure(emptyErr)
+			select {
+			case out <- provider.StreamChunk{Err: emptyErr}:
+			case <-ctx.Done():
+			}
+			return
+		}
+
 		if !hasError {
 			a.Breaker.RecordSuccess()
 		}
-
-		fullText := contentBuf.String()
-		cleanText, toolCalls := provider.ParseToolCalls(fullText)
 
 		finishReason := "stop"
 		if len(toolCalls) > 0 {
@@ -401,7 +445,7 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, cred
 			select {
 			case out <- provider.StreamChunk{
 				Content:  cleanText,
-				Upstream: provider.UpstreamState{ChatSessionID: chatSessionID},
+				Upstream: provider.UpstreamState{ChatSessionID: chatSessionID, MessageID: parser.MessageID},
 			}:
 			case <-ctx.Done():
 				return
@@ -413,7 +457,7 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, cred
 			Done:         true,
 			ToolCalls:    toolCalls,
 			FinishReason: finishReason,
-			Upstream:     provider.UpstreamState{ChatSessionID: chatSessionID},
+			Upstream:     provider.UpstreamState{ChatSessionID: chatSessionID, MessageID: parser.MessageID},
 		}:
 		case <-ctx.Done():
 			return

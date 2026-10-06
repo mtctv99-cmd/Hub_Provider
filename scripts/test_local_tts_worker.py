@@ -14,7 +14,7 @@ REPO_ROOT = SCRIPTS_DIR.parent
 sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(REPO_ROOT))
 
-from local_tts_worker import LocalTTSWorker
+from local_tts_worker import LocalTTSWorker, worker_registration
 from colab.combined_worker import make_wav
 
 
@@ -99,6 +99,13 @@ class LocalTTSWorkerTests(unittest.TestCase):
         pong = []
         self.worker.dispatch({'type': 'ping'}, lambda m: pong.append(m))
         self.assertEqual(pong, [{'type': 'pong'}])
+
+    def test_registration_advertises_per_voice_thread_capacity(self):
+        reg = worker_registration('gpu-test', self.worker, 'hidden', 10)
+        self.assertEqual(reg['max_concurrency'], 10)
+        self.assertEqual(reg['model_concurrency']['piper:ngochuyennew'], 3)
+        self.assertEqual(reg['model_concurrency']['piper:th_TH-mms_female-medium'], 3)
+        self.assertEqual(reg['model_concurrency']['piper:khmer_tts_v3'], 3)
 
     def test_concurrent_20_tts_jobs(self):
         # Dispatch 20 parallel TTS jobs across the 3 voices

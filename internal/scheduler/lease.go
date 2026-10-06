@@ -10,9 +10,9 @@ import (
 	"sync/atomic"
 	"time"
 
-		"sever_provider/internal/identity"
-		"sever_provider/internal/provider"
-	)
+	"sever_provider/internal/identity"
+	"sever_provider/internal/provider"
+)
 
 type Lease struct {
 	ID           string
@@ -34,10 +34,45 @@ type LeaseManager struct {
 	capacities map[string]*leaseCapacity
 	leases     map[string]Lease
 	now        func() time.Time
+	// waiters is the bounded FIFO admission queue for Acquire (P1-2).
+	// ponytail: turn check is per-domain so one hot domain never blocks others;
+	// upgrade to cond-broadcast only if the 25ms poll shows up in profiles.
+	waiters    []leaseWaiter
+	nextTicket uint64
+	maxQueue   int
 }
 
+type leaseWaiter struct {
+	ticket uint64
+	domain string
+}
+
+// StreamLeaseTTL separates stream lease lifetime from request TimeoutSec (P0-3).
+// Streams Renew it per chunk, so the sweep only reaps stalled streams.
+// ponytail: fixed value; upgrade to per-model config when long-tail models need it.
+const StreamLeaseTTL = 30 * time.Minute
+
+// ErrLeaseNotFound reports a release-after-sweep race.
+// ponytail: kept as non-nil error (not silent nil) to preserve the
+// lease_test.go contract; dispatch ignores it, so no log noise.
+var ErrLeaseNotFound = errors.New("lease not found")
+
 func NewLeaseManager() *LeaseManager {
-	return &LeaseManager{capacities: make(map[string]*leaseCapacity), leases: make(map[string]Lease), now: time.Now}
+	return &LeaseManager{capacities: make(map[string]*leaseCapacity), leases: make(map[string]Lease), now: time.Now, maxQueue: 128}
+}
+
+// SetMaxQueue bounds the Acquire FIFO; overflow fails fast with ErrNoCapacity.
+func (m *LeaseManager) SetMaxQueue(n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.maxQueue = n
+}
+
+func (m *LeaseManager) maxQueueLocked() int {
+	if m.maxQueue <= 0 {
+		return 128
+	}
+	return m.maxQueue
 }
 
 func (m *LeaseManager) Register(c identity.RuntimeCapacity) {
@@ -74,11 +109,30 @@ func (m *LeaseManager) Acquire(ctx context.Context, domain, requestID string, tt
 	if ttl <= 0 {
 		ttl = 3 * time.Minute
 	}
+	if err := ctx.Err(); err != nil {
+		return Lease{}, err
+	}
+	// P1-2: bounded FIFO admission. Full queue fails fast with ErrNoCapacity
+	// instead of piling unbounded waiters behind a hot credential.
+	m.mu.Lock()
+	if len(m.waiters) >= m.maxQueueLocked() {
+		m.mu.Unlock()
+		return Lease{}, provider.ErrNoCapacity
+	}
+	ticket := m.nextTicket
+	m.nextTicket++
+	m.waiters = append(m.waiters, leaseWaiter{ticket: ticket, domain: domain})
+	m.mu.Unlock()
+	defer m.dequeueWaiter(ticket)
 	for {
 		m.mu.Lock()
-		if lease, ok := m.tryAcquireLocked(domain, requestID, ttl); ok {
-			m.mu.Unlock()
-			return lease, nil
+		// Only the head waiter per domain attempts; other domains never block it.
+		if m.turnLocked(ticket, domain) {
+			if lease, ok := m.tryAcquireLocked(domain, requestID, ttl); ok {
+				m.removeWaiterLocked(ticket)
+				m.mu.Unlock()
+				return lease, nil
+			}
 		}
 		m.mu.Unlock()
 		select {
@@ -89,28 +143,80 @@ func (m *LeaseManager) Acquire(ctx context.Context, domain, requestID string, tt
 	}
 }
 
-// AcquireCredential acquires a lease specifically for the given credentialID.
+// AcquireCredential is a single non-blocking try for one credential (P0-2, P1-3).
+// On a full slot it returns ErrNoCapacity immediately so the dispatcher moves
+// to the next candidate instead of polling here until ctx Done.
 func (m *LeaseManager) AcquireCredential(ctx context.Context, credentialID, requestID string, ttl time.Duration) (Lease, error) {
 	if ttl <= 0 {
 		ttl = 3 * time.Minute
 	}
-	for {
-		m.mu.Lock()
-		lease, ok, canRetry := m.tryAcquireCredentialLocked(credentialID, requestID, ttl)
-		if ok {
-			m.mu.Unlock()
-			return lease, nil
-		}
-		m.mu.Unlock()
-		if !canRetry {
-			return Lease{}, provider.ErrNoCapacity
-		}
-		select {
-		case <-ctx.Done():
-			return Lease{}, ctx.Err()
-		case <-time.After(25 * time.Millisecond):
+	if err := ctx.Err(); err != nil {
+		return Lease{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if lease, ok, _ := m.tryAcquireCredentialLocked(credentialID, requestID, ttl); ok {
+		return lease, nil
+	}
+	return Lease{}, provider.ErrNoCapacity
+}
+
+// Renew extends a live lease; false means it was already swept (P0-3).
+// Streams call it per chunk so the sweep only reaps stalled streams.
+func (m *LeaseManager) Renew(leaseID string, ttl time.Duration) bool {
+	if ttl <= 0 {
+		ttl = 3 * time.Minute
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	lease, ok := m.leases[leaseID]
+	if !ok {
+		return false
+	}
+	lease.ExpiresAt = m.now().Add(ttl)
+	m.leases[leaseID] = lease
+	return true
+}
+
+// IsRegistered reports whether the credential is known to the lease manager.
+// Refresh syncs the externally tracked load (P1-3) before a non-blocking try.
+func (m *LeaseManager) IsRegistered(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.capacities[id]
+	return ok
+}
+
+func (m *LeaseManager) Refresh(id string, active int32) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if c, ok := m.capacities[id]; ok && active >= 0 {
+		atomic.StoreInt32(&c.ActiveLeases, active)
+	}
+}
+
+func (m *LeaseManager) turnLocked(ticket uint64, domain string) bool {
+	for _, w := range m.waiters {
+		if w.domain == domain {
+			return w.ticket == ticket
 		}
 	}
+	return false
+}
+
+func (m *LeaseManager) removeWaiterLocked(ticket uint64) {
+	for i, w := range m.waiters {
+		if w.ticket == ticket {
+			m.waiters = append(m.waiters[:i], m.waiters[i+1:]...)
+			return
+		}
+	}
+}
+
+func (m *LeaseManager) dequeueWaiter(ticket uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.removeWaiterLocked(ticket)
 }
 
 func (m *LeaseManager) tryAcquireCredentialLocked(credentialID, requestID string, ttl time.Duration) (Lease, bool, bool) {
@@ -149,11 +255,16 @@ func (m *LeaseManager) tryAcquireLocked(domain, requestID string, ttl time.Durat
 }
 
 func (m *LeaseManager) Release(leaseID string) error {
+	if leaseID == "" {
+		return ErrLeaseNotFound
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	lease, ok := m.leases[leaseID]
 	if !ok {
-		return errors.New("lease not found")
+		// Release-after-sweep race (P0-3): idempotent on the counter side,
+		// sentinel error so callers can distinguish it from real failures.
+		return ErrLeaseNotFound
 	}
 	if c, ok := m.capacities[lease.CredentialID]; ok && atomic.LoadInt32(&c.ActiveLeases) > 0 {
 		atomic.AddInt32(&c.ActiveLeases, -1)

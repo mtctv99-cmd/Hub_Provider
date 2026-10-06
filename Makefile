@@ -1,4 +1,6 @@
 BINARY := sever-provider
+VERSION := $(shell cat VERSION)
+LDFLAGS := -X sever_provider/internal/buildinfo.Version=$(VERSION)
 ifeq ($(OS),Windows_NT)
   BINARY := sever-provider.exe
 endif
@@ -15,7 +17,7 @@ vet:
 	go vet ./...
 
 build:
-	go build -o $(BINARY) ./cmd/server
+	go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/server
 
 check: tidy test vet build
 

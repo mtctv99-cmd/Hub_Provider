@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -11,7 +13,70 @@ var (
 	ErrCapabilityUnsupported = errors.New("provider does not support requested capability")
 	ErrNoCapacity            = errors.New("no provider capacity available")
 	ErrProviderUnavailable   = errors.New("provider unavailable")
+	ErrEmptyResponse         = errors.New("empty_response")
 )
+
+// EmptyResponseReason names why a chat or stream turn produced no content.
+// EmptyReasonUpstreamEmpty means the upstream produced no text at all;
+// EmptyReasonParserFailed means the upstream payload had text-like content
+// the parser could not extract. Keep values lowercase so gateway masking and
+// error wrapping can match them without exposing credentials.
+type EmptyResponseReason string
+
+const (
+	EmptyReasonUpstreamEmpty EmptyResponseReason = "upstream_empty"
+	EmptyReasonParserFailed  EmptyResponseReason = "parser_failed"
+)
+
+// EmptyResponseError is a coded empty-content failure. Detail must carry a
+// safe diagnosis (payload length, frame presence, counts) and never cookies,
+// tokens, prompts, or chat text.
+type EmptyResponseError struct {
+	Reason EmptyResponseReason
+	Detail string
+}
+
+func (e *EmptyResponseError) Error() string {
+	if e == nil {
+		return ErrEmptyResponse.Error()
+	}
+	reason := strings.TrimSpace(string(e.Reason))
+	if reason == "" {
+		reason = string(EmptyReasonUpstreamEmpty)
+	}
+	if detail := strings.TrimSpace(e.Detail); detail != "" {
+		return fmt.Sprintf("empty_response: %s (%s)", reason, detail)
+	}
+	return fmt.Sprintf("empty_response: %s", reason)
+}
+
+// Is reports ErrEmptyResponse so errors.Is matches any empty response.
+func (e *EmptyResponseError) Is(target error) bool { return target == ErrEmptyResponse }
+
+// NewEmptyResponseError builds a coded empty-content error.
+func NewEmptyResponseError(reason EmptyResponseReason, detail string) error {
+	reason = EmptyResponseReason(strings.TrimSpace(string(reason)))
+	if reason != EmptyReasonParserFailed {
+		reason = EmptyReasonUpstreamEmpty
+	}
+	return &EmptyResponseError{Reason: reason, Detail: strings.TrimSpace(detail)}
+}
+
+// EmptyResponseReasonOf extracts the reason from any wrapped error.
+func EmptyResponseReasonOf(err error) (EmptyResponseReason, bool) {
+	var target *EmptyResponseError
+	if errors.As(err, &target) {
+		return target.Reason, true
+	}
+	lower := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(lower, "parser_failed"):
+		return EmptyReasonParserFailed, true
+	case strings.Contains(lower, "upstream_empty"), strings.Contains(lower, "empty upstream response"), strings.Contains(lower, "empty response"):
+		return EmptyReasonUpstreamEmpty, true
+	}
+	return "", false
+}
 
 type Capability string
 
@@ -93,12 +158,12 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 
 func (m Message) MarshalJSON() ([]byte, error) {
 	type rawMessage struct {
-		Role             string        `json:"role"`
-		Content          any           `json:"content"`
-		ReasoningContent string        `json:"reasoning_content,omitempty"`
-		Name             string        `json:"name,omitempty"`
-		ToolCallID       string        `json:"tool_call_id,omitempty"`
-		ToolCalls        []ToolCall    `json:"tool_calls,omitempty"`
+		Role             string     `json:"role"`
+		Content          any        `json:"content"`
+		ReasoningContent string     `json:"reasoning_content,omitempty"`
+		Name             string     `json:"name,omitempty"`
+		ToolCallID       string     `json:"tool_call_id,omitempty"`
+		ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 	}
 	raw := rawMessage{
 		Role:             m.Role,
@@ -151,15 +216,18 @@ func (m Message) TextContent() string {
 // repeated X-Session-ID continues the same upstream conversation instead
 // of starting a new one on every request.
 type UpstreamState struct {
-	ConversationID string `json:"conversation_id,omitempty"`
-	ResponseID     string `json:"response_id,omitempty"`
-	ChoiceID       string `json:"choice_id,omitempty"`
-	ChatSessionID  string `json:"chat_session_id,omitempty"`
-	InvocationID   int    `json:"invocation_id,omitempty"`
+	ConversationID            string `json:"conversation_id,omitempty"`
+	ResponseID                string `json:"response_id,omitempty"`
+	ChoiceID                  string `json:"choice_id,omitempty"`
+	ChatSessionID             string `json:"chat_session_id,omitempty"`
+	InvocationID              int    `json:"invocation_id,omitempty"`
+	MessageID                 int64  `json:"message_id,omitempty"`
+	ConversationTransferToken string `json:"conversation_transfer_token,omitempty"`
+	TurnState                 string `json:"turn_state,omitempty"`
 }
 
 func (u UpstreamState) Empty() bool {
-	return u.ConversationID == "" && u.ResponseID == "" && u.ChoiceID == "" && u.ChatSessionID == "" && u.InvocationID == 0
+	return u.ConversationID == "" && u.ResponseID == "" && u.ChoiceID == "" && u.ChatSessionID == "" && u.InvocationID == 0 && u.MessageID == 0 && u.ConversationTransferToken == "" && u.TurnState == ""
 }
 
 type ChatRequest struct {

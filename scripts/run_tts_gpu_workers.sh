@@ -7,6 +7,10 @@ cd "$DIR"
 export PYTHONUNBUFFERED=1
 export LD_LIBRARY_PATH="$DIR/venv_tts/lib/nvidia:/home/reup/.local/lib/python3.12/site-packages/nvidia/cu13/lib:/home/reup/.local/lib/python3.12/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH"
 PYTHON="$DIR/venv_tts/bin/python"
+if [ -z "${WORKER_TOKEN:-}" ]; then
+  echo "[RUNNER] WORKER_TOKEN must be set in the service environment" >&2
+  exit 1
+fi
 
 echo "[RUNNER] Starting dual GPU TTS workers..."
 
@@ -16,8 +20,8 @@ run_worker_0() {
     CUDA_VISIBLE_DEVICES=0 $PYTHON scripts/local_tts_worker.py \
       --server ws://127.0.0.1:18080/api/llm/ws/worker \
       --worker-id tts-worker-gpu0 \
-      --token omni-secret-key-123 \
       --models-dir models \
+      --queue-size 3 \
       --concurrency 10 \
       --threads-per-voice 3 \
       --gpu \
@@ -33,8 +37,8 @@ run_worker_1() {
     CUDA_VISIBLE_DEVICES=1 $PYTHON scripts/local_tts_worker.py \
       --server ws://127.0.0.1:18080/api/llm/ws/worker \
       --worker-id tts-worker-gpu1 \
-      --token omni-secret-key-123 \
       --models-dir models \
+      --queue-size 3 \
       --concurrency 10 \
       --threads-per-voice 3 \
       --gpu \

@@ -201,9 +201,6 @@ func extractGeneratedImageURL(raw string) (string, error) {
 			if json.Unmarshal([]byte(payload), &inner) != nil {
 				continue
 			}
-			if u, ok := scanInlineImageURL(payload); ok {
-				return u, nil
-			}
 			if len(inner) <= 4 {
 				continue
 			}
@@ -247,8 +244,8 @@ func extractGeneratedImageURL(raw string) (string, error) {
 					}
 					return nil
 				}
-				if err := walk(attachment, 0); err == nil && found != "" {
-					return found, nil
+				if err := walk(attachment, 0); err != nil {
+					return "", err
 				}
 			}
 		}

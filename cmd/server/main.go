@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -16,6 +17,7 @@ import (
 
 	"sever_provider/internal/admin"
 	"sever_provider/internal/browser"
+	"sever_provider/internal/buildinfo"
 	"sever_provider/internal/colabsupervisor"
 	"sever_provider/internal/config"
 	"sever_provider/internal/db"
@@ -40,7 +42,9 @@ import (
 )
 
 func main() {
+	log.Printf("Sever Provider %s starting", buildinfo.Version)
 	configDir := flag.String("config", "config", "config directory")
+	refreshProfiles := flag.String("refresh-google-profiles", "", "refresh only the comma-separated Google profile IDs, then exit")
 	flag.Parse()
 	cfg, err := config.Load(*configDir)
 	if err != nil {
@@ -73,11 +77,19 @@ func main() {
 	if masterKey == "" {
 		masterKey = cfg.Server.MasterKey
 	}
+	masterKey = strings.TrimSpace(masterKey)
+	if masterKey == "" {
+		// P0-1 fail-fast: no master key = ephemeral encryption. Refuse to start
+		// instead of scrambling the DB with un-decryptable secrets across restarts.
+		fmt.Fprintf(os.Stderr, "MASTER_KEY is required (env MASTER_KEY or server.master_key)\n")
+		os.Exit(2)
+	}
 	secretStore, err := secret.NewStore(masterKey)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "secret store init failed: %v\n", err)
 		return
 	}
+	log.Printf("[startup] MASTER_KEY configured, persistent secret store initialized (key_len=%d)", len(masterKey))
 	database, err := db.Open(context.Background(), cfg.Server.DBPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "database init failed: %v\n", err)
@@ -85,6 +97,17 @@ func main() {
 	}
 	defer database.Close()
 	identityManager := identity.NewManager(database.DB, secretStore)
+	if err := warnUndecryptableGoogleSecrets(context.Background(), identityManager); err != nil {
+		log.Printf("[startup] google secret self-check failed: %v", err)
+	}
+	if *refreshProfiles != "" {
+		if err := refreshSelectedGoogleProfiles(context.Background(), identityManager, geminiAdapter, *refreshProfiles); err != nil {
+			log.Printf("profile refresh failed: %v", err)
+			_ = database.Close()
+			os.Exit(1)
+		}
+		return
+	}
 	runtimeSettings := settings.New(database.DB)
 	if creds, listErr := identityManager.List(context.Background(), "tiktok_api"); listErr == nil {
 		for _, cred := range creds {
@@ -118,7 +141,10 @@ func main() {
 		}
 	}()
 	breakers := scheduler.NewBreakerRegistry()
-	sessions := session.New(session.DefaultMaxTurns, session.DefaultIdleTTL)
+	sessions, err := session.NewPersistent(database.DB)
+	if err != nil {
+		log.Fatalf("initialize persistent chat sessions: %v", err)
+	}
 	pools := pool.New()
 	dispatcher := &scheduler.Dispatcher{Models: models, Credentials: identityManager, Adapters: registry, Leases: leases, Sessions: sessions, Pools: pools, Breakers: breakers, Settings: runtimeSettings}
 	handler := gateway.NewHandler(dispatcher, models)
@@ -160,20 +186,35 @@ func main() {
 	colabSupervisor := colabsupervisor.New(database.DB, colabsupervisor.Config{TokenDir: colabTokenDir, Command: os.Getenv("COLAB_SUPERVISOR_CMD")})
 	handler.SetColabSupervisor(colabSupervisor)
 	browserMgr := browser.NewManager("data/profiles", func(accountID, email, cookieStr, profileDir string) error {
-		secret, _ := json.Marshal(map[string]string{"cookie": cookieStr})
+		validateCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := geminiAdapter.ValidateCookie(validateCtx, cookieStr); err != nil {
+			log.Printf("[AutoLogin] captured cookie for %s (%s) failed upstream validation: %v", email, accountID, err)
+			return fmt.Errorf("upstream cookie validation failed: %w", err)
+		}
+		secretBytes, err := json.Marshal(map[string]string{"cookie": cookieStr})
+		if err != nil {
+			return fmt.Errorf("marshal cookie secret: %w", err)
+		}
 		specs := []identity.GoogleCredentialSpec{{
 			Domain:         "gemini_web",
+			Status:         identity.StatusHealthy,
 			MaxConcurrency: 4,
 			PoolRole:       identity.PoolAuto,
 			SourceRef:      "browser_profile:" + accountID,
-			Secret:         secret,
+			Secret:         secretBytes,
 		}}
-		_, err := identityManager.UpsertGoogleAccount(context.Background(), email, 1, specs)
-		return err
+		if _, err := identityManager.UpsertGoogleAccount(context.Background(), email, 1, specs); err != nil {
+			return fmt.Errorf("upsert google account: %w", err)
+		}
+		log.Printf("[AutoLogin] captured, validated upstream and marked HEALTHY for %s (profile=%s)", email, accountID)
+		return nil
 	})
 	handler.SetBrowserManager(browserMgr)
 	// ponytail: sequential profile refresh. Upgrade to worker pool if profile count > 20.
 	go func() {
+		retryAfter := make(map[string]time.Time)
+		failures := make(map[string]int)
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
 		for {
@@ -199,11 +240,22 @@ func main() {
 						if profileID == "" {
 							continue
 						}
-						cookieStr, err := browserMgr.RefreshAccountFromProfile(profileID)
-						if err != nil {
-							log.Printf("[AutoRefresh] refresh profile %s failed: %v", profileID, err)
+						if time.Now().Before(retryAfter[profileID]) {
 							continue
 						}
+						cookieStr, err := refreshGoogleCredential(reclaimCtx, browserMgr, identityManager, geminiAdapter, cred, profileID)
+						if err != nil {
+							failures[profileID]++
+							delay := time.Hour << min(failures[profileID]-1, 3)
+							retryAfter[profileID] = time.Now().Add(delay)
+							if errors.Is(err, gemini.ErrCookieInvalidOrExpired) {
+								_ = identityManager.SetStatus(reclaimCtx, cred.ID, identity.StatusAuthRequired, nil, false)
+							}
+							log.Printf("[AutoRefresh] profile=%s refresh failed; retry_after=%s: %v", profileID, retryAfter[profileID].Format(time.RFC3339), err)
+							continue
+						}
+						delete(failures, profileID)
+						delete(retryAfter, profileID)
 						secretBytes, err := json.Marshal(map[string]string{"cookie": cookieStr})
 						if err != nil {
 							log.Printf("[AutoRefresh] marshal secret for %s failed: %v", profileID, err)
@@ -264,4 +316,24 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.Server.ShutdownGraceSec)*time.Second)
 	defer cancel()
 	_ = server.Shutdown(ctx)
+}
+
+// warnUndecryptableGoogleSecrets logs credential IDs whose stored secrets can't
+// be decrypted with the current MASTER_KEY. No secret material logged.
+func warnUndecryptableGoogleSecrets(ctx context.Context, manager *identity.Manager) error {
+	details, err := manager.ListIdentityDetails(ctx, "google")
+	if err != nil {
+		return err
+	}
+	for _, detail := range details {
+		for _, cred := range detail.Credentials {
+			if cred == nil || cred.Domain != "gemini_web" {
+				continue
+			}
+			if _, readErr := manager.ReadSecret(ctx, cred.ID); readErr != nil {
+				log.Printf("[WARNING] google credential %s cannot be decrypted with current MASTER_KEY (%v); refusing auto-overwrite (P0-1); re-login via validated browser flow required", cred.ID, readErr)
+			}
+		}
+	}
+	return nil
 }

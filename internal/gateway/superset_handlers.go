@@ -50,16 +50,30 @@ func (h *Handler) AnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "selected model does not support image inputs", "invalid_request_error", "unsupported_capability")
 		return
 	}
-	chatReq := provider.ChatRequest{Model: req.Model, SessionID: r.Header.Get("X-Session-ID"), Messages: req.Messages, MaxTokens: req.MaxTokens, Stream: req.Stream}
+	sessionID := strings.TrimSpace(r.Header.Get("X-Session-ID"))
+	if len(sessionID) > 256 {
+		writeError(w, 400, "X-Session-ID is too long", "invalid_request_error", "invalid_session_id")
+		return
+	}
+	if sessionID != "" {
+		w.Header().Set("X-Session-ID", sessionID)
+	}
+	chatReq := provider.ChatRequest{Model: req.Model, SessionID: sessionID, Messages: req.Messages, MaxTokens: req.MaxTokens, Stream: req.Stream}
 	if req.Stream {
 		h.streamAnthropic(w, r.Context(), chatReq)
 		return
 	}
 	resp, err := h.Dispatcher.Chat(r.Context(), chatReq)
+	if err == nil {
+		resp.Usage = provider.ComputeUsage(chatReq.Messages, chatReq.Tools, resp.Content, resp.ReasoningContent, resp.ToolCalls, &resp.Usage)
+		h.AITokens.Add(uint64(resp.Usage.TotalTokens))
+	}
 	if err != nil {
 		status, msg, code := maskProviderError(err)
 		if h.AuditLog != nil {
-			_ = h.AuditLog.Record(r.Context(), admin.AuditEvent{
+			auditCtx, auditCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+			defer auditCancel()
+			_ = h.AuditLog.Record(auditCtx, admin.AuditEvent{
 				RequestID: r.Header.Get("X-Request-ID"),
 				EventType: "anthropic_message",
 				Model:     req.Model,
@@ -72,7 +86,9 @@ func (h *Handler) AnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.AuditLog != nil {
-		_ = h.AuditLog.Record(r.Context(), admin.AuditEvent{
+		auditCtx, auditCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+		defer auditCancel()
+		_ = h.AuditLog.Record(auditCtx, admin.AuditEvent{
 			RequestID: r.Header.Get("X-Request-ID"),
 			EventType: "anthropic_message",
 			Model:     req.Model,
@@ -115,51 +131,67 @@ func (h *Handler) streamAnthropic(w http.ResponseWriter, ctx context.Context, re
 		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
 		flusher.Flush()
 	}
-		send("message_start", map[string]any{"type": "message_start", "message": map[string]any{"id": id, "type": "message", "role": "assistant", "model": req.Model, "content": []any{}, "stop_reason": nil}})
-		thinkingStarted := false
-		textStarted := false
-		blockIndex := 0
-
-		for chunk := range stream {
-			if chunk.Err != nil {
-				status, msg, code := maskProviderError(chunk.Err)
-				send("error", map[string]any{"type": "error", "error": map[string]any{"type": "api_error", "message": msg, "code": code}})
-				_ = status
-				return
+	send("message_start", map[string]any{"type": "message_start", "message": map[string]any{"id": id, "type": "message", "role": "assistant", "model": req.Model, "content": []any{}, "stop_reason": nil}})
+	thinkingStarted := false
+	textStarted := false
+	blockIndex := 0
+	var streamContent strings.Builder
+	var streamReasoning strings.Builder
+	var streamToolCalls []provider.ToolCall
+	var streamUsage *provider.Usage
+	for chunk := range stream {
+		if chunk.Err != nil {
+			status, msg, code := maskProviderError(chunk.Err)
+			send("error", map[string]any{"type": "error", "error": map[string]any{"type": "api_error", "message": msg, "code": code}})
+			_ = status
+			return
+		}
+		streamContent.WriteString(chunk.Content)
+		streamReasoning.WriteString(chunk.ReasoningContent)
+		if len(chunk.ToolCalls) > 0 {
+			streamToolCalls = append(streamToolCalls, chunk.ToolCalls...)
+		}
+		if chunk.Usage != nil {
+			streamUsage = chunk.Usage
+		}
+		if chunk.ReasoningContent != "" {
+			if !thinkingStarted {
+				thinkingStarted = true
+				send("content_block_start", map[string]any{"type": "content_block_start", "index": blockIndex, "content_block": map[string]any{"type": "thinking", "thinking": ""}})
 			}
-			if chunk.ReasoningContent != "" {
-				if !thinkingStarted {
-					thinkingStarted = true
-					send("content_block_start", map[string]any{"type": "content_block_start", "index": blockIndex, "content_block": map[string]any{"type": "thinking", "thinking": ""}})
-				}
-				send("content_block_delta", map[string]any{"type": "content_block_delta", "index": blockIndex, "delta": map[string]any{"type": "thinking_delta", "thinking": chunk.ReasoningContent}})
-			}
-			if chunk.Content != "" {
-				if thinkingStarted && !textStarted {
-					send("content_block_stop", map[string]any{"type": "content_block_stop", "index": blockIndex})
-					blockIndex++
-				}
-				if !textStarted {
-					textStarted = true
-					send("content_block_start", map[string]any{"type": "content_block_start", "index": blockIndex, "content_block": map[string]any{"type": "text", "text": ""}})
-				}
-				send("content_block_delta", map[string]any{"type": "content_block_delta", "index": blockIndex, "delta": map[string]any{"type": "text_delta", "text": chunk.Content}})
-			}
-			if chunk.Done {
-				if !thinkingStarted && !textStarted {
-					send("content_block_start", map[string]any{"type": "content_block_start", "index": 0, "content_block": map[string]any{"type": "text", "text": ""}})
-					textStarted = true
-				}
+			send("content_block_delta", map[string]any{"type": "content_block_delta", "index": blockIndex, "delta": map[string]any{"type": "thinking_delta", "thinking": chunk.ReasoningContent}})
+		}
+		if chunk.Content != "" {
+			if thinkingStarted && !textStarted {
 				send("content_block_stop", map[string]any{"type": "content_block_stop", "index": blockIndex})
-				send("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": "end_turn", "stop_sequence": nil}, "usage": usageOrEmpty(chunk.Usage)})
-				send("message_stop", map[string]any{"type": "message_stop"})
-				return
+				blockIndex++
 			}
+			if !textStarted {
+				textStarted = true
+				send("content_block_start", map[string]any{"type": "content_block_start", "index": blockIndex, "content_block": map[string]any{"type": "text", "text": ""}})
+			}
+			send("content_block_delta", map[string]any{"type": "content_block_delta", "index": blockIndex, "delta": map[string]any{"type": "text_delta", "text": chunk.Content}})
 		}
-		if textStarted || thinkingStarted {
+		if chunk.Done {
+			if !thinkingStarted && !textStarted {
+				send("content_block_start", map[string]any{"type": "content_block_start", "index": 0, "content_block": map[string]any{"type": "text", "text": ""}})
+				textStarted = true
+			}
 			send("content_block_stop", map[string]any{"type": "content_block_stop", "index": blockIndex})
+			send("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": "end_turn", "stop_sequence": nil}, "usage": usageOrEmpty(chunk.Usage)})
+			send("message_stop", map[string]any{"type": "message_stop"})
+			toks := provider.ComputeUsage(req.Messages, req.Tools, streamContent.String(), streamReasoning.String(), streamToolCalls, streamUsage)
+			h.AITokens.Add(uint64(toks.TotalTokens))
+			if h.Traffic != nil && toks.TotalTokens > 0 {
+				go func(tok int) { _ = h.Traffic.RecordMetrics(context.Background(), time.Now(), 0, int64(tok), 0) }(toks.TotalTokens)
+			}
+			return
 		}
-		send("message_stop", map[string]any{"type": "message_stop"})
+	}
+	if textStarted || thinkingStarted {
+		send("content_block_stop", map[string]any{"type": "content_block_stop", "index": blockIndex})
+	}
+	send("message_stop", map[string]any{"type": "message_stop"})
 }
 
 func (h *Handler) VideoGenerations(w http.ResponseWriter, r *http.Request) {

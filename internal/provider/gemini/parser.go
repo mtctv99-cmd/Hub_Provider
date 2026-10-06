@@ -2,15 +2,66 @@ package gemini
 
 import (
 	"encoding/json"
-	"regexp"
+	"fmt"
 	"strings"
+
+	"sever_provider/internal/provider"
 )
 
-var (
-	conversationRE = regexp.MustCompile(`\bc_[A-Za-z0-9_-]+\b`)
-	responseRE     = regexp.MustCompile(`\br_[A-Za-z0-9_-]+\b`)
-	choiceRE       = regexp.MustCompile(`\brc_[A-Za-z0-9_-]+\b`)
-)
+// DiagnoseEmptyResponse builds an empty_response error that distinguishes an
+// upstream that produced no text from a payload the parser could not extract.
+// It only reports safe metadata (lengths, frame and candidate presence) and
+// never cookies, tokens, prompts, or chat text.
+func DiagnoseEmptyResponse(raw string) error {
+	rawLen := len(raw)
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == ")]}'" {
+		return provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, fmt.Sprintf("gemini upstream returned empty payload (raw_len=%d)", rawLen))
+	}
+	hasFrames := strings.Contains(raw, `"wrb.fr"`)
+	if !hasFrames {
+		return provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, fmt.Sprintf("gemini response had no wrb.fr candidate frames (raw_len=%d)", rawLen))
+	}
+	return provider.NewEmptyResponseError(provider.EmptyReasonParserFailed, fmt.Sprintf("gemini payload contained wrb.fr frames (raw_len=%d) but parser extracted no text", rawLen))
+}
+
+// validStructuredID only accepts IDs coming from JSON wrb.fr frames.
+// ponytail: keep bounds tight; widen only if upstream changes ID format.
+func validConversationID(s string) bool {
+	if !strings.HasPrefix(s, "c_") || len(s) < 3 || len(s) > 128 {
+		return false
+	}
+	for _, c := range s[2:] {
+		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func validResponseID(s string) bool {
+	if !strings.HasPrefix(s, "r_") || len(s) < 3 || len(s) > 128 {
+		return false
+	}
+	for _, c := range s[2:] {
+		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func validChoiceID(s string) bool {
+	if !strings.HasPrefix(s, "rc_") || len(s) < 4 || len(s) > 128 {
+		return false
+	}
+	for _, c := range s[3:] {
+		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
 
 // ExtractResponseLine parses one newline-delimited Gemini wrb.fr snapshot.
 // Gemini sends cumulative text snapshots; callers can diff successive results.
@@ -37,8 +88,12 @@ func ExtractResponseLine(line string) (string, ConversationMetadata, bool) {
 	meta := ConversationMetadata{}
 	if len(inner) > 1 {
 		if ids, ok := inner[1].([]any); ok && len(ids) >= 2 {
-			meta.ConversationID, _ = ids[0].(string)
-			meta.ResponseID, _ = ids[1].(string)
+			if s, _ := ids[0].(string); validConversationID(s) {
+				meta.ConversationID = s
+			}
+			if s, _ := ids[1].(string); validResponseID(s) {
+				meta.ResponseID = s
+			}
 		}
 	}
 	if len(inner) <= 4 {
@@ -53,7 +108,9 @@ func ExtractResponseLine(line string) (string, ConversationMetadata, bool) {
 		return "", meta, false
 	}
 	if len(candidate) > 0 {
-		meta.ChoiceID, _ = candidate[0].(string)
+		if s, _ := candidate[0].(string); validChoiceID(s) {
+			meta.ChoiceID = s
+		}
 	}
 	var b strings.Builder
 	if texts, ok := candidate[1].([]any); ok {
@@ -151,34 +208,25 @@ func ExtractConversationMetadata(raw string) ConversationMetadata {
 		}
 		if len(inner) > 1 {
 			if ids, ok := inner[1].([]any); ok && len(ids) >= 2 {
-				meta.ConversationID, _ = ids[0].(string)
-				meta.ResponseID, _ = ids[1].(string)
+				if s, _ := ids[0].(string); validConversationID(s) {
+					meta.ConversationID = s
+				}
+				if s, _ := ids[1].(string); validResponseID(s) {
+					meta.ResponseID = s
+				}
 			}
 		}
 		if len(inner) > 4 {
 			if candidates, ok := inner[4].([]any); ok && len(candidates) > 0 {
 				if first, ok := candidates[0].([]any); ok && len(first) > 0 {
-					meta.ChoiceID, _ = first[0].(string)
+					if s, _ := first[0].(string); validChoiceID(s) {
+						meta.ChoiceID = s
+					}
 				}
 			}
 		}
 		if meta.ConversationID != "" && meta.ResponseID != "" && meta.ChoiceID != "" {
 			return meta
-		}
-	}
-	if meta.ConversationID == "" {
-		if m := conversationRE.FindString(raw); m != "" {
-			meta.ConversationID = m
-		}
-	}
-	if meta.ResponseID == "" {
-		if m := responseRE.FindString(raw); m != "" {
-			meta.ResponseID = m
-		}
-	}
-	if meta.ChoiceID == "" {
-		if m := choiceRE.FindString(raw); m != "" {
-			meta.ChoiceID = m
 		}
 	}
 	return meta

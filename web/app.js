@@ -302,21 +302,50 @@ let lastTikTokMarkup = '';
 
 let lastDeepSeekMarkup = '';
 
+function formatCooldownTime(value) {
+  if (!value) return '';
+  const d = new Date(value);
+  if (!Number.isFinite(d.getTime())) return '';
+  const diffMs = d.getTime() - Date.now();
+  if (diffMs <= 0) return 'Sắp mở lại';
+  const hours = Math.floor(diffMs / 3600000);
+  const mins = Math.floor((diffMs % 3600000) / 60000);
+  const timeStr = `${d.getDate().toString().padStart(2, '0')}/${(d.getMonth() + 1).toString().padStart(2, '0')} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+  if (hours > 24) {
+    const days = Math.floor(hours / 24);
+    return `Mở: ${timeStr} (còn ${days}d ${hours % 24}h)`;
+  }
+  return `Mở: ${timeStr} (còn ${hours}h ${mins}m)`;
+}
+
 function renderDeepSeekAccounts(accounts) {
   const list = $('#deepseek-account-list');
   if (!list) return;
-  const markup = accounts.length ? accounts.map(a => `
+  const markup = accounts.length ? accounts.map(a => {
+    const isMuted = a.is_muted || (a.status === 'RATE_LIMITED' && a.cooldown_until);
+    let pillClass = 'partial';
+    let label = esc(a.status || 'UNKNOWN');
+    if (a.status === 'HEALTHY') {
+      pillClass = 'healthy';
+      label = 'READY';
+    } else if (isMuted) {
+      pillClass = 'cooldown';
+      const when = formatCooldownTime(a.cooldown_until);
+      label = when ? `BỊ CHẶN (${when})` : 'BỊ CHẶN';
+    }
+    return `
     <article class="account-card unified-account-card">
       <div class="account-primary-info">
-        <h3 class="account-email">${esc(a.identity_id || a.id)}</h3>
-        <div class="account-badges"><span class="credential-pill ${a.status === 'HEALTHY' ? 'healthy' : 'partial'}">${esc(a.status || 'UNKNOWN')}</span>
+        <h3 class="account-email">${esc(a.email || a.identity_id || a.id)}</h3>
+        <div class="account-badges"><span class="credential-pill ${pillClass}">${label}</span>
           <span class="credential-meta-pill">${esc(a.max_concurrency)} slots</span></div>
       </div>
       <div class="account-actions-group">
-        <button class="icon-button" data-deepseek-login="${esc(a.identity_id)}" title="Mở trình duyệt đăng nhập lại">${icon('refresh')}</button>
+        <button class="icon-button" data-deepseek-login="${esc(a.profile_id || a.identity_id)}" title="Mở lại profile DeepSeek đã lưu để đăng nhập">${icon('refresh')}</button>
         <button class="icon-button danger" data-deepseek-delete="${esc(a.identity_id)}" title="Xóa tài khoản DeepSeek">${icon('trash')}</button>
       </div>
-    </article>`).join('') : '<div class="empty-state">Chưa có tài khoản DeepSeek. Nhấn "+ Thêm tài khoản DeepSeek" để thêm.</div>';
+    </article>`;
+  }).join('') : '<div class="empty-state">Chưa có tài khoản DeepSeek. Nhấn "+ Thêm tài khoản DeepSeek" để thêm.</div>';
   if (markup !== lastDeepSeekMarkup) { list.innerHTML = markup; lastDeepSeekMarkup = markup; }
 }
 

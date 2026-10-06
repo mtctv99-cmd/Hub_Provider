@@ -171,6 +171,9 @@ func extractSessionID(resp map[string]any) string {
 // SendPrompt giải PoW challenge tự động và gửi request completions trả về HTTP response stream.
 // Caller có trách nhiệm đóng resp.Body.
 func (c *Client) SendPrompt(ctx context.Context, token, chatSessionID, prompt string, thinkingEnabled, searchEnabled bool) (*http.Response, string, error) {
+	return c.SendPromptWithParent(ctx, token, chatSessionID, prompt, thinkingEnabled, searchEnabled, 0)
+}
+func (c *Client) SendPromptWithParent(ctx context.Context, token, chatSessionID, prompt string, thinkingEnabled, searchEnabled bool, parentID int64) (*http.Response, string, error) {
 	token = strings.TrimSpace(token)
 	if token == "" {
 		return nil, "", errors.New("deepseek: missing authentication token")
@@ -204,6 +207,9 @@ func (c *Client) SendPrompt(ctx context.Context, token, chatSessionID, prompt st
 		"thinking_enabled":  thinkingEnabled,
 		"search_enabled":    searchEnabled,
 	}
+	if parentID > 0 {
+		payload["parent_message_id"] = parentID
+	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
 		return nil, "", fmt.Errorf("marshal completion payload: %w", err)
@@ -235,5 +241,34 @@ func (c *Client) SendPrompt(ctx context.Context, token, chatSessionID, prompt st
 		return nil, "", fmt.Errorf("deepseek completion HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
+	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "application/json") {
+		defer resp.Body.Close()
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 65536))
+		if err != nil {
+			return nil, "", err
+		}
+		var result struct {
+			Code int `json:"code"`
+			Data struct {
+				BizCode int `json:"biz_code"`
+				BizData struct {
+					IsMuted   int     `json:"is_muted"`
+					MuteUntil float64 `json:"mute_until"`
+				} `json:"biz_data"`
+			} `json:"data"`
+		}
+		if json.Unmarshal(body, &result) != nil {
+			return nil, "", fmt.Errorf("deepseek: unexpected JSON completion")
+		}
+		if result.Data.BizData.IsMuted != 0 {
+			return nil, "", &RateLimitError{Until: time.Unix(int64(result.Data.BizData.MuteUntil), 0)}
+		}
+		return nil, "", fmt.Errorf("deepseek: completion rejected code=%d biz_code=%d", result.Code, result.Data.BizCode)
+	}
 	return resp, chatSessionID, nil
 }
+
+type RateLimitError struct{ Until time.Time }
+
+func (e *RateLimitError) Error() string         { return "deepseek: rate limited (account muted)" }
+func (e *RateLimitError) RetryAfter() time.Time { return e.Until }

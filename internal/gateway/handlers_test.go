@@ -107,8 +107,8 @@ func TestGatewayMasksProviderErrors(t *testing.T) {
 	if strings.Contains(string(data), "secret upstream") {
 		t.Fatalf("raw provider error leaked: %s", data)
 	}
-	if r.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("status=%d, want 503", r.StatusCode)
+	if r.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status=%d, want 502", r.StatusCode)
 	}
 }
 
@@ -429,7 +429,89 @@ func TestGatewayDeepSeekRealAdapterIntegration(t *testing.T) {
 	}
 	var resp ChatCompletionResponse
 	_ = json.NewDecoder(r.Body).Decode(&resp)
-	if len(resp.Choices) == 0 || resp.Choices[0].Message.Content != "Hello from real DeepSeek adapter!" {
-		t.Fatalf("unexpected completion response: %+v", resp)
+		if len(resp.Choices) == 0 || resp.Choices[0].Message.Content != "Hello from real DeepSeek adapter!" {
+			t.Fatalf("unexpected completion response: %+v", resp)
+		}
 	}
-}
+
+	type emptyMockAdapter struct{}
+
+	func (emptyMockAdapter) Name() string { return "empty_mock" }
+	func (emptyMockAdapter) Capabilities() []provider.Capability {
+		return []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming}
+	}
+	func (emptyMockAdapter) Chat(context.Context, provider.ChatRequest, []byte) (provider.ChatResponse, error) {
+		return provider.ChatResponse{ID: "mock-empty", Content: ""}, nil
+	}
+	func (emptyMockAdapter) StreamChat(context.Context, provider.ChatRequest, []byte) (<-chan provider.StreamChunk, error) {
+		ch := make(chan provider.StreamChunk, 1)
+		ch <- provider.StreamChunk{Done: true}
+		close(ch)
+		return ch, nil
+	}
+	func (emptyMockAdapter) Speech(context.Context, provider.SpeechRequest, []byte) ([]byte, string, error) {
+		return nil, "", provider.ErrCapabilityUnsupported
+	}
+	func (emptyMockAdapter) Image(context.Context, provider.ImageRequest, []byte) (provider.ImageResponse, error) {
+		return provider.ImageResponse{}, provider.ErrCapabilityUnsupported
+	}
+
+	func TestGatewayEmptyResponseHandledCorrectly(t *testing.T) {
+		models := scheduler.NewModelRegistry()
+		_ = models.Register(scheduler.ModelSpec{
+			ID:           "empty-model",
+			Provider:     "empty_mock",
+			Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming},
+			TimeoutSec:   5,
+		})
+		reg := provider.NewRegistry()
+		reg.Register(emptyMockAdapter{})
+		leases := scheduler.NewLeaseManager()
+		d := &scheduler.Dispatcher{
+			Models:      models,
+			Credentials: mockSource{},
+			Adapters:    reg,
+			Leases:      leases,
+		}
+		h := NewHandler(d, models)
+		srv := httptest.NewServer(NewRouter(h, ""))
+		defer srv.Close()
+
+		// 1. Non-streaming empty response
+		{
+			body := strings.NewReader(`{"model":"empty-model","messages":[{"role":"user","content":"hi"}]}`)
+			r, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", body)
+			if err != nil {
+				t.Fatalf("request failed: %v", err)
+			}
+			defer r.Body.Close()
+			if r.StatusCode != http.StatusBadGateway {
+				t.Fatalf("expected 502 Bad Gateway for empty response, got %d", r.StatusCode)
+			}
+			var env ErrorEnvelope
+			if err := json.NewDecoder(r.Body).Decode(&env); err != nil {
+				t.Fatalf("decode error envelope failed: %v", err)
+			}
+			if env.Error.Code != "empty_response" {
+				t.Fatalf("expected error code empty_response, got %q", env.Error.Code)
+			}
+		}
+
+		// 2. Streaming empty response
+		{
+			body := strings.NewReader(`{"model":"empty-model","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+			r, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", body)
+			if err != nil {
+				t.Fatalf("stream request failed: %v", err)
+			}
+			defer r.Body.Close()
+			data, _ := io.ReadAll(r.Body)
+			raw := string(data)
+			if strings.Contains(raw, "data: [DONE]") {
+				t.Fatalf("expected stream to NOT contain [DONE] on empty response, got: %s", raw)
+			}
+			if !strings.Contains(raw, "empty_response") {
+				t.Fatalf("expected stream to contain empty_response error, got: %s", raw)
+			}
+		}
+	}

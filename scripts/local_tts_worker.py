@@ -12,6 +12,8 @@ import base64
 import json
 import logging
 import os
+import queue
+import re
 import signal
 import sys
 import threading
@@ -38,9 +40,10 @@ LOG = logging.getLogger('local_tts_worker')
 
 
 class LocalTTSWorker:
-    """Manages in-memory voice lanes and serializes per-voice synthesis."""
-    def __init__(self, voices, queue_size=32, voice_threads=3):
-        self.voices = {name: VoiceLane(name, voice, queue_size, num_threads=voice_threads) for name, voice in voices.items()}
+    """Manages in-memory voice lanes and bounds concurrent synthesis per voice."""
+    def __init__(self, voices, queue_size=3, voice_threads=3):
+        self.voice_threads = max(1, voice_threads)
+        self.voices = {name: VoiceLane(name, voice, queue_size, num_threads=self.voice_threads) for name, voice in voices.items()}
 
     def dispatch(self, msg, send):
         typ, rid, model = msg.get('type'), msg.get('request_id'), msg.get('model')
@@ -58,16 +61,29 @@ class LocalTTSWorker:
         if not isinstance(text, str) or not text.strip():
             send({'type': 'error', 'request_id': rid, 'error': 'empty text'})
             return
-        LOG.info('[DISPATCH] Received %s for %s (%d chars)', rid, voice_id, len(text))
+        LOG.info('[TTS] accepted request=%s voice=%s chars=%d queue_depth=%d', rid, voice_id, len(text), voice.jobs.qsize())
         try:
-            voice.jobs.put_nowait((msg, send))
-        except Exception:
-            LOG.error('[DISPATCH] Queue full for %s on %s', voice_id, rid)
+            voice.jobs.put_nowait((msg, send, time.monotonic()))
+        except queue.Full:
+            LOG.error('[TTS] rejected request=%s voice=%s reason=queue_full queue_depth=%d', rid, voice_id, voice.jobs.qsize())
             send({'type': 'error', 'request_id': rid, 'error': 'voice queue full'})
 
     def close(self):
         for lane in self.voices.values():
             lane.close()
+
+
+def worker_registration(worker_id, worker, token, concurrency):
+    models = sorted('piper:' + name for name in worker.voices)
+    return {
+        'worker_id': worker_id,
+        'model': models[0],
+        'models': models,
+        'capabilities': ['audio_speech', 'tts'],
+        'max_concurrency': concurrency,
+        'model_concurrency': {model: worker.voice_threads for model in models},
+        'token': token or '',
+    }
 
 
 def run_worker_loop(server_url, token, worker_id, worker, stop, concurrency=10, retry=3):
@@ -82,15 +98,7 @@ def run_worker_loop(server_url, token, worker_id, worker, stop, concurrency=10, 
         query['token'] = token
     url = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), ''))
 
-    models = sorted('piper:' + name for name in worker.voices)
-    reg = {
-        'worker_id': worker_id,
-        'model': models[0],
-        'models': models,
-        'capabilities': ['audio_speech', 'tts'],
-        'max_concurrency': concurrency,
-        'token': token or '',
-    }
+    reg = worker_registration(worker_id, worker, token, concurrency)
 
     LOG.info('Registered voices in RAM: %s', list(worker.voices.keys()))
 
@@ -116,7 +124,7 @@ def run_worker_loop(server_url, token, worker_id, worker, stop, concurrency=10, 
                 stop.wait(retry)
                 continue
 
-            LOG.info('Worker %s connected and active on %s (models: %s)', worker_id, server_url, models)
+            LOG.info('Worker %s connected and active (models: %s)', worker_id, reg['models'])
             sock.settimeout(1.0)
             while not stop.is_set():
                 try:
@@ -151,13 +159,16 @@ def main():
     parser.add_argument('--models-dir', type=Path, default=Path('models'), help='Directory containing voice models')
     parser.add_argument('--khmer-onnx', type=Path, help='Path to khmer_tts_v3.onnx')
     parser.add_argument('--khmer-config', type=Path, help='Path to khmer_tts_v3.json')
-    parser.add_argument('--queue-size', type=int, default=32, help='Internal job queue size per voice (default: 32)')
+    parser.add_argument('--queue-size', type=int, default=3, help='Bounded buffer per voice (default: 3)')
     parser.add_argument('--khmer-rate', type=int, default=22050)
     parser.add_argument('--concurrency', type=int, default=20, help='Max worker TTS concurrency (default: 20)')
     parser.add_argument('--threads-per-voice', type=int, default=3, help='Parallel threads per voice lane (default: 3)')
     parser.add_argument('--gpu', action='store_true', help='Use CUDA GPU for Piper and Khmer TTS')
     parser.add_argument('--device-id', type=int, default=None, help='CUDA device ID (0 for GPU 0, 1 for GPU 1)')
     args = parser.parse_args()
+
+    if args.queue_size < 1 or args.threads_per_voice < 1 or args.concurrency < 1:
+        parser.error('queue-size, threads-per-voice, and concurrency must be positive')
 
     if args.device_id is not None:
         os.environ['CUDA_VISIBLE_DEVICES'] = str(args.device_id)

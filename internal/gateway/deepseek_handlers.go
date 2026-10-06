@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"sever_provider/internal/browser"
 	"sever_provider/internal/identity"
@@ -283,18 +284,58 @@ func (h *Handler) DeepSeekAccounts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	items := make([]map[string]any, 0, len(creds))
+	now := time.Now()
 	for _, c := range creds {
 		profileID := strings.TrimPrefix(c.SourceRef, "browser_profile:")
 		if profileID == c.SourceRef || profileID == "" {
 			profileID = c.IdentityID
 		}
-		items = append(items, map[string]any{
+		status := c.Status
+		var cooldownUntilStr string
+		var cooldownUntilUnix int64
+		isMuted := false
+
+		if (status == identity.StatusRateLimited || status == identity.StatusCooldown) && c.CooldownUntil != nil {
+			if !now.Before(*c.CooldownUntil) {
+				// Cooldown expired: auto-unblock and persist
+				status = identity.StatusHealthy
+				c.CooldownUntil = nil
+				if updater, ok := h.Credentials.(interface {
+					SetStatus(context.Context, string, identity.CredentialStatus, *time.Time, bool) error
+				}); ok {
+					_ = updater.SetStatus(r.Context(), c.ID, identity.StatusHealthy, nil, false)
+				}
+			} else {
+				isMuted = true
+				cooldownUntilStr = c.CooldownUntil.Format(time.RFC3339)
+				cooldownUntilUnix = c.CooldownUntil.Unix()
+			}
+		}
+
+		email := ""
+		if manager != nil {
+			if detail, err := manager.GetIdentityDetail(r.Context(), c.IdentityID); err == nil && detail.Identity.Email != "" {
+				email = detail.Identity.Email
+			}
+		}
+		if email == "" && strings.HasPrefix(c.IdentityID, "deepseek-") {
+			email = strings.TrimPrefix(c.IdentityID, "deepseek-")
+		}
+
+		item := map[string]any{
 			"id":              c.ID,
 			"identity_id":     c.IdentityID,
+			"email":           email,
 			"profile_id":      profileID,
-			"status":          c.Status,
+			"status":          status,
 			"max_concurrency": c.MaxConcurrency,
-		})
+			"is_muted":        isMuted,
+		}
+		if cooldownUntilStr != "" {
+			item["cooldown_until"] = cooldownUntilStr
+			item["cooldown_until_unix"] = cooldownUntilUnix
+		}
+		items = append(items, item)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"accounts": items})
 }
