@@ -86,6 +86,7 @@ const (
 	CapabilityVision    Capability = "vision"
 	CapabilitySpeech    Capability = "audio_speech"
 	CapabilityImage     Capability = "image_generation"
+	CapabilityVideo     Capability = "video_generation"
 	CapabilityReasoning Capability = "reasoning"
 )
 
@@ -347,6 +348,20 @@ type ImageResponse struct {
 	MIME string `json:"-"`
 }
 
+type VideoRequest struct {
+	Model     string `json:"model"`
+	Prompt    string `json:"prompt"`
+	Duration  int    `json:"duration,omitempty"`
+	Size      string `json:"size,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+}
+
+type VideoResponse struct {
+	URL  string `json:"url,omitempty"`
+	Data []byte `json:"-"`
+	MIME string `json:"-"`
+}
+
 type Adapter interface {
 	Name() string
 	Capabilities() []Capability
@@ -354,6 +369,7 @@ type Adapter interface {
 	StreamChat(ctx context.Context, req ChatRequest, credentialSecret []byte) (<-chan StreamChunk, error)
 	Speech(ctx context.Context, req SpeechRequest, credentialSecret []byte) ([]byte, string, error)
 	Image(ctx context.Context, req ImageRequest, credentialSecret []byte) (ImageResponse, error)
+	Video(ctx context.Context, req VideoRequest, credentialSecret []byte) (VideoResponse, error)
 }
 
 type Result struct {

@@ -38,6 +38,7 @@ func (a *Adapter) Capabilities() []provider.Capability {
 		provider.CapabilityVision,
 		provider.CapabilityImage,
 		provider.CapabilitySpeech,
+		provider.CapabilityVideo,
 	}
 }
 
@@ -164,5 +165,25 @@ func (a *Adapter) Image(ctx context.Context, req provider.ImageRequest, credenti
 
 	return provider.ImageResponse{
 		URL: imageURL,
+	}, nil
+}
+
+func (a *Adapter) Video(ctx context.Context, req provider.VideoRequest, credentialSecret []byte) (provider.VideoResponse, error) {
+	cookies, token, err := parseCredentialSecret(credentialSecret)
+	if err != nil {
+		return provider.VideoResponse{}, err
+	}
+
+	a.AcquireLease()
+	defer a.ReleaseLease()
+
+	videoURL, err := a.Client.GenerateVideo(ctx, req, cookies, token)
+	if err != nil {
+		return provider.VideoResponse{}, err
+	}
+
+	return provider.VideoResponse{
+		URL:  videoURL,
+		MIME: "video/mp4",
 	}, nil
 }

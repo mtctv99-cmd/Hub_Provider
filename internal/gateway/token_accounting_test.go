@@ -41,6 +41,9 @@ func (mockZeroUsageAdapter) Speech(context.Context, provider.SpeechRequest, []by
 func (mockZeroUsageAdapter) Image(context.Context, provider.ImageRequest, []byte) (provider.ImageResponse, error) {
 	return provider.ImageResponse{}, provider.ErrCapabilityUnsupported
 }
+func (mockZeroUsageAdapter) Video(context.Context, provider.VideoRequest, []byte) (provider.VideoResponse, error) {
+	return provider.VideoResponse{}, provider.ErrCapabilityUnsupported
+}
 
 func TestGlobalAITokensCalculation(t *testing.T) {
 	models := scheduler.NewModelRegistry()

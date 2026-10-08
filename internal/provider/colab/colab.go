@@ -45,6 +45,9 @@ func (a *Adapter) Speech(context.Context, provider.SpeechRequest, []byte) ([]byt
 func (a *Adapter) Image(context.Context, provider.ImageRequest, []byte) (provider.ImageResponse, error) {
 	return provider.ImageResponse{}, provider.ErrCapabilityUnsupported
 }
+func (a *Adapter) Video(context.Context, provider.VideoRequest, []byte) (provider.VideoResponse, error) {
+	return provider.VideoResponse{}, provider.ErrCapabilityUnsupported
+}
 
 func (a *Adapter) connect(ctx context.Context) (*websocket.Conn, error) {
 	u, err := url.Parse(a.cfg.URL)

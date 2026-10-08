@@ -34,6 +34,9 @@ func (imageMock) Speech(context.Context, provider.SpeechRequest, []byte) ([]byte
 func (imageMock) Image(context.Context, provider.ImageRequest, []byte) (provider.ImageResponse, error) {
 	return provider.ImageResponse{Data: []byte("png")}, nil
 }
+func (imageMock) Video(context.Context, provider.VideoRequest, []byte) (provider.VideoResponse, error) {
+	return provider.VideoResponse{}, provider.ErrCapabilityUnsupported
+}
 
 type sourceMock struct{}
 

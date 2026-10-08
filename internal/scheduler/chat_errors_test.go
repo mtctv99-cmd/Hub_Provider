@@ -55,6 +55,9 @@ func (e *emptyAdapter) Speech(context.Context, provider.SpeechRequest, []byte) (
 func (e *emptyAdapter) Image(context.Context, provider.ImageRequest, []byte) (provider.ImageResponse, error) {
 	return provider.ImageResponse{}, provider.ErrCapabilityUnsupported
 }
+func (e *emptyAdapter) Video(context.Context, provider.VideoRequest, []byte) (provider.VideoResponse, error) {
+	return provider.VideoResponse{}, provider.ErrCapabilityUnsupported
+}
 
 func TestChatEmptyContentBlocksSessionAndRecordsFailure(t *testing.T) {
 	models := NewModelRegistry()

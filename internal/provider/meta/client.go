@@ -280,3 +280,47 @@ func (c *Client) GenerateImage(ctx context.Context, req provider.ImageRequest, c
 	}
 	return imageURL, nil
 }
+
+// GenerateVideo requests video generation and returns the CDN URL.
+func (c *Client) GenerateVideo(ctx context.Context, req provider.VideoRequest, cookies, token string) (string, error) {
+	if err := SanitizeCredential(cookies, token); err != nil {
+		return "", err
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"prompt":     req.Prompt,
+		"model":      req.Model,
+		"duration":   req.Duration,
+		"session_id": strings.TrimSpace(req.SessionID),
+	})
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, museBaseURL+"/api/artifacts", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	httpReq.Header = buildHeaders(cookies, token)
+
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("meta video request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return "", fmt.Errorf("meta auth expired (status %d)", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("meta video failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+
+	videoURL, err := extractVideoURL(data)
+	if err != nil {
+		return "", err
+	}
+	return videoURL, nil
+}

@@ -210,6 +210,9 @@ func (a *Adapter) StreamChat(context.Context, provider.ChatRequest, []byte) (<-c
 func (a *Adapter) Image(context.Context, provider.ImageRequest, []byte) (provider.ImageResponse, error) {
 	return provider.ImageResponse{}, provider.ErrCapabilityUnsupported
 }
+func (a *Adapter) Video(context.Context, provider.VideoRequest, []byte) (provider.VideoResponse, error) {
+	return provider.VideoResponse{}, provider.ErrCapabilityUnsupported
+}
 
 func (a *Adapter) Speech(ctx context.Context, req provider.SpeechRequest, credentialSecret []byte) ([]byte, string, error) {
 	parts := splitText(req.Input, maxTextBytes)

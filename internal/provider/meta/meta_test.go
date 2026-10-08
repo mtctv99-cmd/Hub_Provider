@@ -93,3 +93,13 @@ func TestExtractImageURL(t *testing.T) {
 		t.Fatal("expected error when no url present")
 	}
 }
+
+func TestExtractVideoURL(t *testing.T) {
+	u, err := extractVideoURL([]byte(`{"url":"https://example.com/a.mp4"}`))
+	if err != nil || u != "https://example.com/a.mp4" {
+		t.Fatalf("expected video url, got %q err=%v", u, err)
+	}
+	if _, err := extractVideoURL([]byte(`{"nothing":"here"}`)); err == nil {
+		t.Fatal("expected error when no url present")
+	}
+}

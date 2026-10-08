@@ -12,6 +12,7 @@ import (
 )
 
 var cdnImageURLPattern = regexp.MustCompile(`https?://[^\s"'<>]+\.(?:png|jpg|jpeg|webp)`)
+var cdnVideoURLPattern = regexp.MustCompile(`https?://[^\s"'<>]+\.(?:mp4|webm|mov)`)
 
 func extractImageURL(data []byte) (string, error) {
 	var payload struct {
@@ -37,10 +38,40 @@ func extractImageURL(data []byte) (string, error) {
 		}
 	}
 	str := string(data)
-	if m := cdnImageURLPattern.FindString(str); m != "" {
+		if m := cdnImageURLPattern.FindString(str); m != "" {
+			return m, nil
+		}
+		return "", errors.New("no image url found in meta response")
+	}
+
+func extractVideoURL(data []byte) (string, error) {
+	var payload struct {
+		URL   string   `json:"url"`
+		URLs  []string `json:"urls"`
+		Video string   `json:"video"`
+		Data  struct {
+			URL string `json:"url"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(data, &payload) == nil {
+		if payload.URL != "" {
+			return payload.URL, nil
+		}
+		if len(payload.URLs) > 0 && payload.URLs[0] != "" {
+			return payload.URLs[0], nil
+		}
+		if payload.Video != "" {
+			return payload.Video, nil
+		}
+		if payload.Data.URL != "" {
+			return payload.Data.URL, nil
+		}
+	}
+	str := string(data)
+	if m := cdnVideoURLPattern.FindString(str); m != "" {
 		return m, nil
 	}
-	return "", errors.New("no image url found in meta response")
+	return "", errors.New("no video url found in meta response")
 }
 
 func parseStreamBody(r io.Reader, sessionID string, out chan<- provider.StreamChunk) {
