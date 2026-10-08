@@ -456,6 +456,9 @@ func extractRawTokenString(raw string) string {
 	return raw
 }
 
+// ExtractEmailFromToken decodes the JWT payload and returns the best identity claim.
+func ExtractEmailFromToken(jwtToken string) string { return extractEmailFromToken(jwtToken) }
+
 // extractEmailFromToken giải mã phần payload của JWT để tìm trường email hoặc name nếu có.
 func extractEmailFromToken(jwtToken string) string {
 	parts := strings.Split(jwtToken, ".")

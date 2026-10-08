@@ -215,6 +215,19 @@
             <span class="provider-stat-sub">requests</span>
           </div>
         </div>
+
+        <div class="provider-stat-card card-meta">
+          <div class="provider-stat-header">
+            <span class="provider-card-icon meta">
+              <svg viewBox="0 0 24 24"><path fill="#0081FB" d="M12 7.3c-1.5-2.5-3.5-3.8-5.8-3.8C2.7 3.5 0 6.6 0 10.7c0 4.7 3.9 9.8 8.1 9.8 2.4 0 4.2-1.5 5.4-3.3 1.2 1.8 3 3.3 5.4 3.3 4.2 0 8.1-5.1 8.1-9.8 0-4.1-2.7-7.2-6.2-7.2-2.3 0-4.3 1.3-5.8 3.8zm-5.7-.9c1.6 0 3.2 1.2 4.3 3.3-1.2 2.3-3 5.3-4.9 5.3-2.1 0-3.7-2-3.7-4.8 0-2.2 1.8-3.8 4.3-3.8zm11.4 0c2.5 0 4.3 1.6 4.3 3.8 0 2.8-1.6 4.8-3.7 4.8-1.9 0-3.7-3-4.9-5.3 1.1-2.1 2.7-3.3 4.3-3.3z"/></svg>
+            </span>
+            <span class="provider-card-name">Meta (muse.ai)</span>
+          </div>
+          <div class="provider-stat-body">
+            <strong class="provider-stat-value" id="status-meta-requests">0</strong>
+            <span class="provider-stat-sub">requests</span>
+          </div>
+        </div>
       </section>
     </section>
 
@@ -276,6 +289,31 @@
         <div id="deepseek-browser-status" class="browser-flow-status" role="status" hidden></div>
         <div id="deepseek-account-list" class="account-grid" aria-live="polite"><div class="empty-state">Đang tải danh sách tài khoản DeepSeek…</div></div>
       </section>
+
+      <section class="provider-panel" data-provider-section="meta">
+        <div class="provider-actions-row">
+          <button class="btn" id="open-meta-browser">+ Thêm tài khoản Meta</button>
+          <button class="btn secondary" id="open-meta-cookie-modal">Dán Cookie</button>
+          <button class="btn secondary" id="stop-meta-login" type="button" hidden>Dừng đăng nhập</button>
+        </div>
+        <div id="meta-browser-status" class="browser-flow-status" role="status" hidden></div>
+        <div id="meta-account-list" class="account-grid" aria-live="polite"><div class="empty-state">Đang tải danh sách tài khoản Meta…</div></div>
+      </section>
+      <dialog id="add-meta-modal" class="provider-modal" aria-labelledby="add-meta-title">
+        <form id="add-meta-form">
+          <div class="modal-header"><h3 id="add-meta-title">Thêm tài khoản Meta (muse.ai)</h3><button type="button" class="icon-button" id="close-meta-modal" aria-label="Đóng">✕</button></div>
+          <label>Email (tùy chọn)<input id="meta-email-input" type="email" autocomplete="email" placeholder="user@meta.ai (để trống để tự nhận diện)"></label>
+          <label>Cookies (c_user, datr, xs, abra_sess...)<textarea id="meta-cookie-input" rows="3" spellcheck="false" placeholder="Dán Cookie: c_user=...; datr=...; xs=..."></textarea></label>
+          <label>Access token (tùy chọn)<input id="meta-token-input" type="password" autocomplete="off" spellcheck="false" placeholder="Bearer token nếu có"></label>
+          <div class="modal-fields">
+            <label>Max concurrency<input id="meta-concurrency-input" type="number" min="1" max="8" step="1" value="2" required></label>
+            <label>Pool role<select id="meta-role-input"><option value="AUTO">Auto</option><option value="SESSION" selected>Session</option><option value="WORKER">Worker</option></select></label>
+          </div>
+          <p class="modal-help">Lấy từ DevTools sau khi đăng nhập muse.ai hoặc meta.ai. Cookie lưu mã hóa AES-GCM.</p>
+          <p id="meta-form-error" class="auth-error" role="alert" hidden></p>
+          <div class="modal-actions"><button type="button" class="btn secondary" id="cancel-meta-modal">Hủy</button><button type="submit" class="btn" id="submit-meta-account">Lưu tài khoản</button></div>
+        </form>
+      </dialog>
 
       <section class="provider-panel" data-provider-section="other">
         <div class="empty-state">Các nhà cung cấp mới sẽ tự động hiển thị ở đây mà không cần đổi cấu trúc tab.</div>
@@ -475,6 +513,10 @@
         <span class="provider-switch" data-provider-panel="copilot" title="Microsoft Copilot">
           <span class="provider-tab-icon copilot" aria-hidden="true"><svg viewBox="0 0 48 48"><path fill="#0EA5E9" d="M7 28c0-10.5 8.5-19 19-19 5.1 0 9.8 2 13.3 5.2l-5.1 5.1A11.6 11.6 0 0 0 26 15.9c-6.7 0-12.1 5.4-12.1 12.1 0 1.2.2 2.4.5 3.5L7 28Z"/><path fill="#6366F1" d="M14.4 31.5c2 5.2 6.5 8.7 11.6 8.7 4.3 0 8.1-2.3 10.2-5.7l-6.3-3.7a4.7 4.7 0 0 1-3.9 2.2c-2.3 0-4.3-1.3-5.3-3.2l-6.3 1.7Z"/><path fill="#A855F7" d="M36.2 16.1A19 19 0 0 1 41 28c0 2.3-.4 4.5-1.2 6.5l-6.7-2.6c.4-1.2.6-2.5.6-3.9 0-2.9-1-5.6-2.8-7.7l5.3-4.2Z"/></svg></span>
           <span class="provider-tab-label">Copilot</span>
+        </span>
+        <span class="provider-switch" data-provider-panel="meta" title="Meta (muse.ai)">
+          <span class="provider-tab-icon meta" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 7.3c-1.5-2.5-3.5-3.8-5.8-3.8C2.7 3.5 0 6.6 0 10.7c0 4.7 3.9 9.8 8.1 9.8 2.4 0 4.2-1.5 5.4-3.3 1.2 1.8 3 3.3 5.4 3.3 4.2 0 8.1-5.1 8.1-9.8 0-4.1-2.7-7.2-6.2-7.2-2.3 0-4.3 1.3-5.8 3.8zm-5.7-.9c1.6 0 3.2 1.2 4.3 3.3-1.2 2.3-3 5.3-4.9 5.3-2.1 0-3.7-2-3.7-4.8 0-2.2 1.8-3.8 4.3-3.8zm11.4 0c2.5 0 4.3 1.6 4.3 3.8 0 2.8-1.6 4.8-3.7 4.8-1.9 0-3.7-3-4.9-5.3 1.1-2.1 2.7-3.3 4.3-3.3z"/></svg></span>
+          <span class="provider-tab-label">Meta</span>
         </span>
         <span class="provider-switch" data-provider-panel="other" title="Khác">
           <span class="provider-tab-icon other" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M11 3h2v8h8v2h-8v8h-2v-8H3v-2h8V3z"/></svg></span>

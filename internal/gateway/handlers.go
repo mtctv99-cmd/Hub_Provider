@@ -243,7 +243,7 @@ func (h *Handler) modelAvailable(spec scheduler.ModelSpec) bool {
 	if h.Breakers != nil && !h.Breakers.Get(spec.Provider).Allow(time.Now()) {
 		return false
 	}
-	if spec.Provider == "google_colab" {
+	if spec.Provider == "google_colab" || spec.Provider == "vllm" {
 		return h.Workers != nil && h.Workers.Available(spec.ID)
 	}
 	if spec.Provider == "piper_local" {
@@ -329,31 +329,31 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	chatReq := provider.ChatRequest{Model: req.Model, SessionID: sessionID, Messages: req.Messages, Tools: req.Tools, ToolChoice: req.ToolChoice, Stream: req.Stream, Temperature: req.Temperature, MaxTokens: req.MaxTokens}
 	isWorkerModel := false
-	if spec, ok := h.Models.Get(req.Model); ok && spec.Provider == "google_colab" {
-		isWorkerModel = true
-	} else if h.Workers != nil && h.Workers.Available(req.Model) {
-		isWorkerModel = true
-	}
-	if isWorkerModel {
-		if req.Stream {
-			h.streamColab(w, ctx, chatReq)
-			return
+		if spec, ok := h.Models.Get(req.Model); ok && (spec.Provider == "google_colab" || spec.Provider == "vllm") {
+			isWorkerModel = true
+		} else if h.Workers != nil && h.Workers.Available(req.Model) {
+			isWorkerModel = true
 		}
-		if h.Workers == nil {
-			writeError(w, http.StatusServiceUnavailable, "Worker unavailable", "provider_error", "worker_unavailable")
-			return
-		}
-		resp, err := h.Workers.Chat(ctx, chatReq)
-		if err != nil {
-			log.Printf("[GATEWAY] colab chat failed: %v", err)
-			status, message, code := maskColabError(err)
-			writeError(w, status, message, "provider_error", code)
-			return
-		}
-		if strings.TrimSpace(resp.Content) == "" && len(resp.ToolCalls) == 0 {
-			writeError(w, http.StatusBadGateway, "upstream worker returned empty response", "provider_error", "empty_response")
-			return
-		}
+		if isWorkerModel {
+			if req.Stream {
+				h.streamColab(w, ctx, chatReq)
+				return
+			}
+			if h.Workers == nil {
+				writeError(w, http.StatusServiceUnavailable, "Worker unavailable", "provider_error", "worker_unavailable")
+				return
+			}
+			resp, err := h.Workers.Chat(ctx, chatReq)
+			if err != nil {
+				log.Printf("[GATEWAY] colab chat failed: %v", err)
+				status, message, code := maskColabError(err)
+				writeError(w, status, message, "provider_error", code)
+				return
+			}
+			if strings.TrimSpace(resp.Content) == "" && strings.TrimSpace(resp.ReasoningContent) == "" && len(resp.ToolCalls) == 0 {
+				writeError(w, http.StatusBadGateway, "upstream worker returned empty response", "provider_error", "empty_response")
+				return
+			}
 		resp.Usage = provider.ComputeUsage(req.Messages, req.Tools, resp.Content, resp.ReasoningContent, resp.ToolCalls, &resp.Usage)
 		h.AITokens.Add(uint64(resp.Usage.TotalTokens))
 		if h.Traffic != nil && resp.Usage.TotalTokens > 0 {
@@ -747,9 +747,9 @@ func (h *Handler) DashboardStatus(w http.ResponseWriter, r *http.Request) {
 	} else {
 		status["breakers"] = map[string]string{}
 	}
-	if h.Credentials != nil {
-		for _, domain := range []string{"gemini_web", "google_colab", "copilot_ws", "piper_local", "tiktok_api", "deepseek_web"} {
-			items, err := h.Credentials.List(r.Context(), domain)
+		if h.Credentials != nil {
+			for _, domain := range []string{"gemini_web", "google_colab", "copilot_ws", "piper_local", "tiktok_api", "deepseek_web", "meta_web"} {
+				items, err := h.Credentials.List(r.Context(), domain)
 			if err == nil {
 				if h.Leases != nil {
 					for i := range items {
@@ -797,6 +797,8 @@ func modelProvider(model string) string {
 	switch {
 	case strings.Contains(model, "deepseek"):
 		return "deepseek_web"
+	case strings.Contains(model, "meta"), strings.Contains(model, "muse"):
+		return "meta_web"
 	case strings.Contains(model, "tiktok"), strings.HasPrefix(model, "bv0"):
 		return "tiktok_api"
 	case strings.Contains(model, "colab"), strings.Contains(model, "gemma"):

@@ -67,42 +67,14 @@ models:
     provider: copilot_ws
     capabilities: [image_generation]
     timeout_sec: 120
+  gemma4-e4b:
+    provider: google_colab
+    capabilities: [chat, streaming, vision, reasoning]
+    timeout_sec: 180
   gemma-4-colab:
     provider: google_colab
-    capabilities: [chat, streaming, vision]
-    timeout_sec: 300
-  qwen3-vl-4b:
-    provider: google_colab
-    capabilities: [chat, streaming, vision]
-    timeout_sec: 300
-  Qwen3-VL-4B-Instruct-Q4_K_M:
-    provider: google_colab
-    capabilities: [chat, streaming, vision]
-    timeout_sec: 300
-  Qwen3VL-4B-Instruct-Q4_K_M:
-    provider: google_colab
-    capabilities: [chat, streaming, vision]
-    timeout_sec: 300
-  qwen3-vl:
-    provider: google_colab
-    capabilities: [chat, streaming, vision]
-    timeout_sec: 300
-  qwen25-vl:
-    provider: google_colab
-    capabilities: [chat, streaming, vision]
-    timeout_sec: 300
-  qwen2.5-vl:
-    provider: google_colab
-    capabilities: [chat, streaming, vision]
-    timeout_sec: 300
-  Qwen2.5-VL-7B-Instruct-Q4_K_M:
-    provider: google_colab
-    capabilities: [chat, streaming, vision]
-    timeout_sec: 300
-  Qwen3VL-8B-Instruct-Q4_K_M:
-    provider: google_colab
-    capabilities: [chat, streaming, vision]
-    timeout_sec: 300
+    capabilities: [chat, streaming, vision, reasoning]
+    timeout_sec: 180
   piper:ngochuyennew:
     provider: piper_local
     capabilities: [audio_speech]
@@ -127,3 +99,15 @@ models:
     provider: tiktok_api
     capabilities: [audio_speech]
     timeout_sec: 15
+  muse-chat:
+    provider: meta_web
+    capabilities: [chat, streaming, vision]
+    timeout_sec: 180
+  muse-image:
+    provider: meta_web
+    capabilities: [image_generation]
+    timeout_sec: 180
+  muse-voice:
+    provider: meta_web
+    capabilities: [audio_speech]
+    timeout_sec: 120

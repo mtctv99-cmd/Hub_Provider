@@ -248,6 +248,8 @@ func poolRoleOrAuto(role PoolRole) PoolRole {
 
 func newShortID() string { return fmt.Sprintf("%d", time.Now().UnixNano()) }
 
+func NewShortID() string { return newShortID() }
+
 func (m *Manager) ReadSecret(ctx context.Context, credentialID string) ([]byte, error) {
 	var payload, nonce []byte
 	err := m.db.QueryRowContext(ctx, `SELECT encrypted_payload, nonce FROM credential_secrets WHERE credential_id=?`, credentialID).Scan(&payload, &nonce)
@@ -480,5 +482,14 @@ func (m *Manager) SetPoolRole(ctx context.Context, id string, role PoolRole) err
 		return fmt.Errorf("invalid pool role %q", role)
 	}
 	_, err := m.db.ExecContext(ctx, `UPDATE credentials SET pool_role=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`, role, id)
+	return err
+}
+
+func (m *Manager) LinkSharedSourceRef(ctx context.Context, email, sourceRef string) error {
+	_, err := m.db.ExecContext(ctx, `
+		UPDATE credentials 
+		SET source_ref=?, updated_at=CURRENT_TIMESTAMP
+		WHERE identity_id IN (SELECT id FROM identities WHERE normalized_email=?)
+	`, sourceRef, normalizeEmail(email))
 	return err
 }
