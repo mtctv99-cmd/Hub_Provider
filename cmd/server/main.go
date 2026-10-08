@@ -32,6 +32,7 @@ import (
 	"sever_provider/internal/provider/copilot"
 	"sever_provider/internal/provider/deepseek"
 	"sever_provider/internal/provider/gemini"
+	"sever_provider/internal/provider/meta"
 	"sever_provider/internal/provider/piper"
 	"sever_provider/internal/provider/tiktok"
 	"sever_provider/internal/scheduler"
@@ -72,6 +73,7 @@ func main() {
 	registry.Register(copilot.New(nil))
 	registry.Register(colab.New(colab.Config{URL: os.Getenv("COLAB_WS_URL"), WorkerID: os.Getenv("COLAB_WORKER_ID"), APIKey: os.Getenv("COLAB_API_KEY")}))
 	registry.Register(deepseek.New(nil))
+	registry.Register(meta.New(nil))
 
 	masterKey := os.Getenv("MASTER_KEY")
 	if masterKey == "" {
@@ -204,11 +206,12 @@ func main() {
 			SourceRef:      "browser_profile:" + accountID,
 			Secret:         secretBytes,
 		}}
-		if _, err := identityManager.UpsertGoogleAccount(context.Background(), email, 1, specs); err != nil {
-			return fmt.Errorf("upsert google account: %w", err)
-		}
-		log.Printf("[AutoLogin] captured, validated upstream and marked HEALTHY for %s (profile=%s)", email, accountID)
-		return nil
+			if _, err := identityManager.UpsertGoogleAccount(context.Background(), email, 1, specs); err != nil {
+				return fmt.Errorf("upsert google account: %w", err)
+			}
+			_ = identityManager.LinkSharedSourceRef(context.Background(), email, "browser_profile:"+accountID)
+			log.Printf("[AutoLogin] captured, validated upstream and marked HEALTHY for %s (profile=%s)", email, accountID)
+			return nil
 	})
 	handler.SetBrowserManager(browserMgr)
 	// ponytail: sequential profile refresh. Upgrade to worker pool if profile count > 20.

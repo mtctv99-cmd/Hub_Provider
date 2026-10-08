@@ -8,4 +8,6 @@ const (
 	DomainPiperLocal  = "piper_local"
 	DomainTikTokAPI   = "tiktok_api"
 	DomainDeepSeekWeb = "deepseek_web"
+	DomainMetaWeb     = "meta_web"
+	DomainMuseWeb     = "muse_web"
 )
