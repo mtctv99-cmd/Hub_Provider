@@ -116,6 +116,9 @@ func (m *MetaManager) StartWithURL(accountID, targetURL string) (string, error) 
 		"--user-data-dir="+profile,
 		"--no-first-run",
 		"--no-default-browser-check",
+		"--no-sandbox",
+		"--disable-gpu",
+		"--disable-dev-shm-usage",
 		"--disable-blink-features=AutomationControlled",
 		targetURL,
 	)
@@ -298,7 +301,7 @@ func watchMetaCDP(ctx context.Context, port int, wait time.Duration) (cookieStr,
 		_ = conn.SetReadDeadline(time.Now().Add(wait))
 
 		var foundCookies []string
-		var hasCUser, hasDatr, hasAbraSess bool
+		var hasCUser, hasDatr, hasAbraSess, hasXs bool
 		var cUserVal string
 
 		for {
@@ -317,20 +320,22 @@ func watchMetaCDP(ctx context.Context, port int, wait time.Duration) (cookieStr,
 					} `json:"cookies"`
 				} `json:"result"`
 			}
-			if json.Unmarshal(data, &cookieResp) == nil && cookieResp.ID == 10 {
-				for _, c := range cookieResp.Result.Cookies {
-					foundCookies = append(foundCookies, fmt.Sprintf("%s=%s", c.Name, c.Value))
-					switch strings.ToLower(c.Name) {
-					case "c_user":
-						hasCUser = true
-						cUserVal = c.Value
-					case "datr":
-						hasDatr = true
-					case "abra_sess", "meta_ai_session":
-						hasAbraSess = true
+				if json.Unmarshal(data, &cookieResp) == nil && cookieResp.ID == 10 {
+					for _, c := range cookieResp.Result.Cookies {
+						foundCookies = append(foundCookies, fmt.Sprintf("%s=%s", c.Name, c.Value))
+						switch strings.ToLower(c.Name) {
+						case "c_user":
+							hasCUser = true
+							cUserVal = c.Value
+						case "datr":
+							hasDatr = true
+						case "abra_sess", "meta_ai_session":
+							hasAbraSess = true
+						case "xs", "fr":
+							hasXs = true
+						}
 					}
 				}
-			}
 
 			// Handle localStorage eval
 			var evalResp struct {
@@ -388,8 +393,9 @@ func watchMetaCDP(ctx context.Context, port int, wait time.Duration) (cookieStr,
 		// A valid Meta / muse.ai session exists if:
 		// 1) c_user cookie exists (logged in Meta/Facebook account)
 		// 2) abra_sess or meta_ai_session cookie exists
-		// 3) a Bearer token or access_token was extracted
-		isAuth := hasCUser || (hasDatr && hasAbraSess) || len(tokenStr) > 20
+		// 3) xs + datr pair exists (Facebook session cookies)
+		// 4) a Bearer token or access_token was extracted
+		isAuth := hasCUser || (hasDatr && hasAbraSess) || (hasDatr && hasXs) || len(tokenStr) > 20
 
 		if isAuth {
 			if email == "" {

@@ -293,27 +293,10 @@
       <section class="provider-panel" data-provider-section="meta">
         <div class="provider-actions-row">
           <button class="btn" id="open-meta-browser">+ Thêm tài khoản Meta</button>
-          <button class="btn secondary" id="open-meta-cookie-modal">Dán Cookie</button>
-          <button class="btn secondary" id="stop-meta-login" type="button" hidden>Dừng đăng nhập</button>
         </div>
         <div id="meta-browser-status" class="browser-flow-status" role="status" hidden></div>
         <div id="meta-account-list" class="account-grid" aria-live="polite"><div class="empty-state">Đang tải danh sách tài khoản Meta…</div></div>
       </section>
-      <dialog id="add-meta-modal" class="provider-modal" aria-labelledby="add-meta-title">
-        <form id="add-meta-form">
-          <div class="modal-header"><h3 id="add-meta-title">Thêm tài khoản Meta (muse.ai)</h3><button type="button" class="icon-button" id="close-meta-modal" aria-label="Đóng">✕</button></div>
-          <label>Email (tùy chọn)<input id="meta-email-input" type="email" autocomplete="email" placeholder="user@meta.ai (để trống để tự nhận diện)"></label>
-          <label>Cookies (c_user, datr, xs, abra_sess...)<textarea id="meta-cookie-input" rows="3" spellcheck="false" placeholder="Dán Cookie: c_user=...; datr=...; xs=..."></textarea></label>
-          <label>Access token (tùy chọn)<input id="meta-token-input" type="password" autocomplete="off" spellcheck="false" placeholder="Bearer token nếu có"></label>
-          <div class="modal-fields">
-            <label>Max concurrency<input id="meta-concurrency-input" type="number" min="1" max="8" step="1" value="2" required></label>
-            <label>Pool role<select id="meta-role-input"><option value="AUTO">Auto</option><option value="SESSION" selected>Session</option><option value="WORKER">Worker</option></select></label>
-          </div>
-          <p class="modal-help">Lấy từ DevTools sau khi đăng nhập muse.ai hoặc meta.ai. Cookie lưu mã hóa AES-GCM.</p>
-          <p id="meta-form-error" class="auth-error" role="alert" hidden></p>
-          <div class="modal-actions"><button type="button" class="btn secondary" id="cancel-meta-modal">Hủy</button><button type="submit" class="btn" id="submit-meta-account">Lưu tài khoản</button></div>
-        </form>
-      </dialog>
 
       <section class="provider-panel" data-provider-section="other">
         <div class="empty-state">Các nhà cung cấp mới sẽ tự động hiển thị ở đây mà không cần đổi cấu trúc tab.</div>

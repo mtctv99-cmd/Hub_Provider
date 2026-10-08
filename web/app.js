@@ -1247,7 +1247,7 @@ copilotForm?.addEventListener('submit', async event => {
   }
 });
 
-// META (muse.ai) — browser auto-login + manual cookie paste
+// META (muse.ai) — browser auto-login
 let lastMetaMarkup = '';
 let metaLoginPoll = null;
 function showMetaBrowserStatus(message, tone = 'info') {
@@ -1256,6 +1256,10 @@ function showMetaBrowserStatus(message, tone = 'info') {
   el.hidden = false;
   el.className = `browser-flow-status ${tone}`;
   el.textContent = message;
+}
+function hideMetaBrowserStatus() {
+  const el = $('#meta-browser-status');
+  if (el) el.hidden = true;
 }
 function stopMetaLoginPoll() {
   if (metaLoginPoll) clearInterval(metaLoginPoll);
@@ -1283,7 +1287,7 @@ function renderMetaAccounts(accounts) {
         <button class="icon-button danger" data-meta-delete="${esc(a.identity.id)}" title="Xóa tài khoản Meta">${icon('trash')}</button>
       </div>
     </article>`;
-  }).join('') : '<div class="empty-state">Chưa có tài khoản Meta. Nhấn "+ Thêm tài khoản Meta" để đăng nhập browser hoặc "Dán Cookie".</div>';
+  }).join('') : '<div class="empty-state">Chưa có tài khoản Meta. Nhấn "+ Thêm tài khoản Meta" để đăng nhập browser.</div>';
   if (markup !== lastMetaMarkup) { list.innerHTML = markup; lastMetaMarkup = markup; }
 }
 async function loadMetaAccounts() {
@@ -1306,14 +1310,22 @@ async function pollMetaLoginStatus() {
     const r = await fetchJSON('/admin/api/meta/auto-login/status');
     if (!r.ok) return;
     const status = await r.json();
-    if (status.message) showMetaBrowserStatus(status.message, status.captured ? 'success' : status.running ? 'info' : 'error');
-    const stopBtn = $('#stop-meta-login');
-    if (stopBtn) stopBtn.hidden = !status.running;
-    if (status.captured || !status.running) {
+    if (status.captured) {
       stopMetaLoginPoll();
+      hideMetaBrowserStatus();
       await loadMetaAccounts();
+      return;
     }
-  } catch (_) { stopMetaLoginPoll(); }
+    if (!status.running) {
+      stopMetaLoginPoll();
+      if (status.message) showMetaBrowserStatus(status.message, 'error');
+      await loadMetaAccounts();
+      return;
+    }
+    if (status.message) showMetaBrowserStatus(status.message, 'info');
+  } catch (_) {
+    stopMetaLoginPoll();
+  }
 }
 async function startMetaBrowserLogin(identityID = '') {
   try {
@@ -1327,8 +1339,6 @@ async function startMetaBrowserLogin(identityID = '') {
       return;
     }
     showMetaBrowserStatus('Đã mở Chrome Meta (muse.ai). Hãy đăng nhập trên màn hình desktop/VNC; phiên sẽ tự bắt và lưu!', 'info');
-    const stopBtn = $('#stop-meta-login');
-    if (stopBtn) stopBtn.hidden = false;
     stopMetaLoginPoll();
     metaLoginPoll = setInterval(pollMetaLoginStatus, 2000);
     await pollMetaLoginStatus();
@@ -1341,11 +1351,6 @@ $('#open-meta-browser')?.addEventListener('click', async () => {
   if (button) button.disabled = true;
   try { await startMetaBrowserLogin(); }
   finally { if (button) button.disabled = false; }
-});
-$('#stop-meta-login')?.addEventListener('click', async () => {
-  stopMetaLoginPoll();
-  try { await fetchJSON('/admin/api/meta/auto-login/stop', {method: 'POST'}); }
-  finally { const b = $('#stop-meta-login'); if (b) b.hidden = true; showMetaBrowserStatus('Đã dừng browser đăng nhập Meta.'); }
 });
 $('#meta-account-list')?.addEventListener('click', async event => {
   const refreshBtn = event.target.closest('[data-meta-refresh]');
@@ -1372,47 +1377,6 @@ $('#meta-account-list')?.addEventListener('click', async event => {
       showMetaBrowserStatus(err.message || 'Không xóa được tài khoản Meta.', 'error');
     } finally { delBtn.disabled = false; }
   }
-});
-const metaModal = $('#add-meta-modal');
-const metaForm = $('#add-meta-form');
-function closeMetaModal() { metaModal?.close(); }
-$('#open-meta-cookie-modal')?.addEventListener('click', () => metaModal?.showModal());
-$('#close-meta-modal')?.addEventListener('click', closeMetaModal);
-$('#cancel-meta-modal')?.addEventListener('click', closeMetaModal);
-metaModal?.addEventListener('close', () => {
-  metaForm?.reset();
-  const c = $('#meta-cookie-input'); if (c) c.value = '';
-  const t = $('#meta-token-input'); if (t) t.value = '';
-  const e = $('#meta-form-error'); if (e) e.hidden = true;
-});
-metaForm?.addEventListener('submit', async event => {
-  event.preventDefault();
-  const error = $('#meta-form-error');
-  if (error) error.hidden = true;
-  const submit = $('#submit-meta-account');
-  const body = JSON.stringify({
-    email: $('#meta-email-input').value.trim(),
-    cookies: $('#meta-cookie-input').value.trim(),
-    token: $('#meta-token-input').value.trim(),
-    max_concurrency: Number($('#meta-concurrency-input').value),
-    pool_role: $('#meta-role-input').value
-  });
-  const c = $('#meta-cookie-input'); if (c) c.value = '';
-  const t = $('#meta-token-input'); if (t) t.value = '';
-  if (submit) submit.disabled = true;
-  try {
-    const r = await fetchJSON('/admin/api/meta/accounts', {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body
-    });
-    if (!r.ok) {
-      const data = await r.json().catch(() => ({}));
-      throw new Error(data?.error?.message || 'Không thể lưu tài khoản Meta.');
-    }
-    closeMetaModal();
-    await loadMetaAccounts();
-  } catch (err) {
-    if (error) { error.textContent = err.message || 'Không thể lưu tài khoản Meta.'; error.hidden = false; }
-  } finally { if (submit) submit.disabled = false; }
 });
 
 $('#account-list')?.addEventListener('click', async e => {
