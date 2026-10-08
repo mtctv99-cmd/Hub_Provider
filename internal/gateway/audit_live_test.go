@@ -207,6 +207,9 @@ func (a *syntheticAuditAdapter) Speech(context.Context, provider.SpeechRequest, 
 func (a *syntheticAuditAdapter) Image(context.Context, provider.ImageRequest, []byte) (provider.ImageResponse, error) {
 	return provider.ImageResponse{}, provider.ErrCapabilityUnsupported
 }
+func (a *syntheticAuditAdapter) Video(context.Context, provider.VideoRequest, []byte) (provider.VideoResponse, error) {
+	return provider.VideoResponse{}, provider.ErrCapabilityUnsupported
+}
 
 type syntheticCredentialSource struct {
 	creds []identity.Credential

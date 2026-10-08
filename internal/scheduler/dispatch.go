@@ -642,6 +642,67 @@ func (d *Dispatcher) Image(ctx context.Context, req provider.ImageRequest) (prov
 	return provider.ImageResponse{}, ErrNoAvailableCredential
 }
 
+func (d *Dispatcher) Video(ctx context.Context, req provider.VideoRequest) (provider.VideoResponse, error) {
+	spec, ok := d.Models.Get(req.Model)
+	if !ok {
+		return provider.VideoResponse{}, fmt.Errorf("model %q is not configured", req.Model)
+	}
+	if !contains(spec.Capabilities, provider.CapabilityVideo) {
+		return provider.VideoResponse{}, provider.ErrCapabilityUnsupported
+	}
+	adapter, ok := d.Adapters.Get(spec.Provider)
+	if !ok {
+		return provider.VideoResponse{}, fmt.Errorf("provider %q is not registered", spec.Provider)
+	}
+	creds, err := d.Credentials.List(ctx, spec.ProviderDomain())
+	if err != nil {
+		return provider.VideoResponse{}, err
+	}
+	creds = d.orderedCredentials(creds, req.SessionID)
+	now := time.Now()
+	lastErr := error(nil)
+	for _, cred := range creds {
+		cred = credentialAfterCooldown(cred, now)
+		if (cred.Status != identity.StatusHealthy && cred.Status != identity.StatusDegraded) || (cred.CooldownUntil != nil && now.Before(*cred.CooldownUntil)) {
+			continue
+		}
+		if d.Breakers != nil {
+			if !d.Breakers.Get(spec.Provider).Allow(now) {
+				continue
+			}
+			if !d.Breakers.GetAccount(cred.ID).Allow(now) {
+				continue
+			}
+		}
+		if d.Leases != nil {
+			d.Leases.Register(identity.RuntimeCapacity{CredentialID: cred.ID, Domain: cred.Domain, Status: cred.Status, MaxConcurrency: maxInt(cred.MaxConcurrency, 1)})
+		}
+		lease, leaseErr := d.acquireCredential(ctx, cred.ID, cred.Domain, req.Model, spec.TimeoutSec, false)
+		if leaseErr != nil {
+			continue
+		}
+		secret, secretErr := d.Credentials.ReadSecret(ctx, cred.ID)
+		if secretErr != nil {
+			d.release(lease)
+			d.recordAttempt(ctx, spec.Provider, cred.ID, fmt.Errorf("credential secret: %w", secretErr))
+			continue
+		}
+		result, callErr := adapter.Video(ctx, req, secret)
+		d.release(lease)
+		d.recordAttempt(ctx, spec.Provider, cred.ID, callErr)
+		if callErr == nil {
+			return result, nil
+		}
+		if lastErr == nil {
+			lastErr = callErr
+		}
+	}
+	if lastErr != nil {
+		return provider.VideoResponse{}, lastErr
+	}
+	return provider.VideoResponse{}, ErrNoAvailableCredential
+}
+
 func (d *Dispatcher) Speech(ctx context.Context, req provider.SpeechRequest) ([]byte, string, error) {
 	voice := strings.TrimSpace(req.Voice)
 	voice = strings.TrimPrefix(voice, "piper:")

@@ -111,3 +111,7 @@ models:
     provider: meta_web
     capabilities: [audio_speech]
     timeout_sec: 120
+  muse-video:
+    provider: meta_web
+    capabilities: [video_generation]
+    timeout_sec: 300

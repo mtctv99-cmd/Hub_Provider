@@ -199,7 +199,63 @@ func (h *Handler) VideoGenerations(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	writeError(w, http.StatusNotImplemented, "video provider adapter is not connected yet", "provider_error", "not_implemented")
+	started := time.Now()
+	var req VideoGenerationRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.Model == "" || req.Prompt == "" {
+		writeError(w, 400, "model and prompt are required", "invalid_request_error", "missing_parameter")
+		return
+	}
+	if h.Models == nil {
+		writeError(w, 503, "model registry is unavailable", "server_error", "models_unavailable")
+		return
+	}
+	spec, configured := h.Models.Get(req.Model)
+	hasVideo := false
+	if configured {
+		for _, cap := range spec.Capabilities {
+			if cap == provider.CapabilityVideo {
+				hasVideo = true
+				break
+			}
+		}
+	}
+	if !configured || !hasVideo {
+		writeError(w, 422, "requested video model is not configured", "invalid_request_error", "model_not_configured")
+		return
+	}
+	if h.Jobs == nil {
+		writeError(w, 503, "job store is unavailable", "server_error", "job_store_unavailable")
+		return
+	}
+	payload, _ := json.Marshal(req)
+	job := &jobstore.Job{Type: "video", Kind: "video", Model: req.Model, Payload: payload, InputJSON: string(payload)}
+	if err := h.Jobs.Create(r.Context(), job); err != nil {
+		if h.AuditLog != nil {
+			_ = h.AuditLog.Record(r.Context(), admin.AuditEvent{
+				RequestID: r.Header.Get("X-Request-ID"),
+				EventType: "video_job_create",
+				Model:     req.Model,
+				Latency:   time.Since(started),
+				ErrorKind: "job_store_failed",
+				Detail:    err.Error(),
+			})
+		}
+		writeError(w, 500, "failed to create video job", "server_error", "job_store_failed")
+		return
+	}
+	if h.AuditLog != nil {
+		_ = h.AuditLog.Record(r.Context(), admin.AuditEvent{
+			RequestID: r.Header.Get("X-Request-ID"),
+			EventType: "video_job_create",
+			Model:     req.Model,
+			Latency:   time.Since(started),
+			Detail:    "job_id=" + job.ID,
+		})
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"job_id": job.ID, "status": string(job.Status), "status_url": "/v1/videos/tasks/" + job.ID})
 }
 
 func (h *Handler) VideoTask(w http.ResponseWriter, r *http.Request) {

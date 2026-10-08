@@ -40,6 +40,9 @@ func (mockAdapter) Speech(context.Context, provider.SpeechRequest, []byte) ([]by
 func (mockAdapter) Image(context.Context, provider.ImageRequest, []byte) (provider.ImageResponse, error) {
 	return provider.ImageResponse{}, nil
 }
+func (mockAdapter) Video(context.Context, provider.VideoRequest, []byte) (provider.VideoResponse, error) {
+	return provider.VideoResponse{}, nil
+}
 
 type mockSource struct{}
 
@@ -135,6 +138,9 @@ func (f failingAdapter) Speech(context.Context, provider.SpeechRequest, []byte) 
 }
 func (f failingAdapter) Image(context.Context, provider.ImageRequest, []byte) (provider.ImageResponse, error) {
 	return provider.ImageResponse{}, f.err
+}
+func (f failingAdapter) Video(context.Context, provider.VideoRequest, []byte) (provider.VideoResponse, error) {
+	return provider.VideoResponse{}, f.err
 }
 
 func TestGatewaySSE(t *testing.T) {
@@ -249,6 +255,9 @@ func (deepseekMockAdapter) Speech(context.Context, provider.SpeechRequest, []byt
 }
 func (deepseekMockAdapter) Image(context.Context, provider.ImageRequest, []byte) (provider.ImageResponse, error) {
 	return provider.ImageResponse{}, provider.ErrCapabilityUnsupported
+}
+func (deepseekMockAdapter) Video(context.Context, provider.VideoRequest, []byte) (provider.VideoResponse, error) {
+	return provider.VideoResponse{}, provider.ErrCapabilityUnsupported
 }
 
 func TestGatewayDeepSeekDispatchChatAndMessages(t *testing.T) {
@@ -454,6 +463,9 @@ func TestGatewayDeepSeekRealAdapterIntegration(t *testing.T) {
 	}
 	func (emptyMockAdapter) Image(context.Context, provider.ImageRequest, []byte) (provider.ImageResponse, error) {
 		return provider.ImageResponse{}, provider.ErrCapabilityUnsupported
+	}
+	func (emptyMockAdapter) Video(context.Context, provider.VideoRequest, []byte) (provider.VideoResponse, error) {
+		return provider.VideoResponse{}, provider.ErrCapabilityUnsupported
 	}
 
 	func TestGatewayEmptyResponseHandledCorrectly(t *testing.T) {

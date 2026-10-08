@@ -51,6 +51,9 @@ func (a *batchTestSpeechAdapter) Speech(_ context.Context, req provider.SpeechRe
 func (a *batchTestSpeechAdapter) Image(context.Context, provider.ImageRequest, []byte) (provider.ImageResponse, error) {
 	return provider.ImageResponse{}, nil
 }
+func (a *batchTestSpeechAdapter) Video(context.Context, provider.VideoRequest, []byte) (provider.VideoResponse, error) {
+	return provider.VideoResponse{}, provider.ErrCapabilityUnsupported
+}
 func (a *batchTestSpeechAdapter) Voices() []piper.Voice {
 	return []piper.Voice{
 		{ID: "voice-a", ModelPath: "/mock/voice-a.onnx"},

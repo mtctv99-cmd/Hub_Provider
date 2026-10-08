@@ -184,6 +184,9 @@ func (a *Adapter) Image(ctx context.Context, req provider.ImageRequest, credenti
 	}
 	return a.generateImage(ctx, account, req.Prompt)
 }
+func (a *Adapter) Video(context.Context, provider.VideoRequest, []byte) (provider.VideoResponse, error) {
+	return provider.VideoResponse{}, provider.ErrCapabilityUnsupported
+}
 
 func IsTokenValid(tokenURL string, minSeconds int64) bool {
 	_, err := ValidateTokenURL(tokenURL, minSeconds)

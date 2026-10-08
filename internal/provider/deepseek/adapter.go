@@ -476,3 +476,8 @@ func (a *Adapter) Speech(context.Context, provider.SpeechRequest, []byte) ([]byt
 func (a *Adapter) Image(context.Context, provider.ImageRequest, []byte) (provider.ImageResponse, error) {
 	return provider.ImageResponse{}, provider.ErrCapabilityUnsupported
 }
+
+// Video không hỗ trợ.
+func (a *Adapter) Video(context.Context, provider.VideoRequest, []byte) (provider.VideoResponse, error) {
+	return provider.VideoResponse{}, provider.ErrCapabilityUnsupported
+}

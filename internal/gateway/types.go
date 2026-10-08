@@ -44,6 +44,14 @@ type ImageGenerationRequest struct {
 	Quality        string `json:"quality,omitempty"`
 }
 
+type VideoGenerationRequest struct {
+	Model     string `json:"model"`
+	Prompt    string `json:"prompt"`
+	Duration  int    `json:"duration,omitempty"`
+	Size      string `json:"size,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+}
+
 type AnthropicMessageRequest struct {
 	Model     string             `json:"model"`
 	Messages  []provider.Message `json:"messages"`

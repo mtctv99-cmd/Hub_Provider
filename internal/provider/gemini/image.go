@@ -104,6 +104,10 @@ func (a *Adapter) generateImageRaw(ctx context.Context, prompt, model, cookie st
 	return string(raw), nil
 }
 
+func (a *Adapter) Video(context.Context, provider.VideoRequest, []byte) (provider.VideoResponse, error) {
+	return provider.VideoResponse{}, provider.ErrCapabilityUnsupported
+}
+
 func imageRPCHeader() string {
 	// Mode 10 bật Imagen trong StreamGenerate RPC, tách khỏi header chat text 71c2d248d3b102ff.
 	return `[1,null,null,null,"56fdd199312815e2",null,null,0,[4,5,6,8,4,5,6,8],null,null,2,null,null,1,1,"37148B01-D513-431C-B2FD-18F42A6EFE22"]`

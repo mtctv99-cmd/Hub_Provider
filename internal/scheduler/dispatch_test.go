@@ -74,6 +74,9 @@ func (a *countAdapter) Speech(_ context.Context, _ provider.SpeechRequest, _ []b
 func (a *countAdapter) Image(_ context.Context, _ provider.ImageRequest, _ []byte) (provider.ImageResponse, error) {
 	return provider.ImageResponse{}, provider.ErrCapabilityUnsupported
 }
+func (a *countAdapter) Video(_ context.Context, _ provider.VideoRequest, _ []byte) (provider.VideoResponse, error) {
+	return provider.VideoResponse{}, provider.ErrCapabilityUnsupported
+}
 
 type singleRegistry struct{ a provider.Adapter }
 
@@ -203,6 +206,9 @@ func (a adapterWithName) Speech(ctx context.Context, req provider.SpeechRequest,
 }
 func (a adapterWithName) Image(ctx context.Context, req provider.ImageRequest, secret []byte) (provider.ImageResponse, error) {
 	return a.Adapter.Image(ctx, req, secret)
+}
+func (a adapterWithName) Video(ctx context.Context, req provider.VideoRequest, secret []byte) (provider.VideoResponse, error) {
+	return a.Adapter.Video(ctx, req, secret)
 }
 
 func TestDispatcherPersistsUpstreamConversation(t *testing.T) {

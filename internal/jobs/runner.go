@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -32,6 +35,14 @@ type LLMRequest struct {
 	Temperature *float32       `json:"temperature,omitempty"`
 	MaxTokens   int            `json:"max_tokens,omitempty"`
 	ExtraParams map[string]any `json:"extra_params,omitempty"`
+}
+
+type VideoJobRequest struct {
+	Model     string `json:"model"`
+	Prompt    string `json:"prompt"`
+	Duration  int    `json:"duration,omitempty"`
+	Size      string `json:"size,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
 }
 
 type Runner struct {
@@ -97,14 +108,16 @@ func (r *Runner) process(parent context.Context, job jobstore.Job) {
 	ctx, cancel := context.WithTimeout(parent, r.Timeout)
 	defer cancel()
 	var err error
-	switch strings.ToLower(job.Type) {
-	case "tts":
-		err = r.processTTS(ctx, job)
-	case "llm", "chat":
-		err = r.processLLM(ctx, job)
-	default:
-		err = fmt.Errorf("unsupported job type %q", job.Type)
-	}
+		switch strings.ToLower(job.Type) {
+		case "tts":
+			err = r.processTTS(ctx, job)
+		case "llm", "chat":
+			err = r.processLLM(ctx, job)
+		case "video":
+			err = r.processVideo(ctx, job)
+		default:
+			err = fmt.Errorf("unsupported job type %q", job.Type)
+		}
 	if err != nil {
 		_ = r.Jobs.Fail(context.Background(), job.ID, err)
 	}
@@ -191,7 +204,7 @@ func (r *Runner) processLLM(ctx context.Context, job jobstore.Job) error {
 		model = job.Model
 	}
 	if r.Dispatcher != nil && r.Dispatcher.Models != nil {
-		if spec, ok := r.Dispatcher.Models.Get(model); ok && spec.Provider == "google_colab" {
+		if spec, ok := r.Dispatcher.Models.Get(model); ok && (spec.Provider == "google_colab" || spec.Provider == "vllm") {
 			if r.Workers == nil {
 				return workerhub.ErrNoWorker
 			}
@@ -215,4 +228,114 @@ func (r *Runner) processLLM(ctx context.Context, job jobstore.Job) error {
 	}
 	result, _ := json.Marshal(map[string]any{"text": resp.Content, "model": resp.Model, "usage": resp.Usage})
 	return r.Jobs.CompleteWithOutput(context.Background(), job.ID, string(result), "", "application/json")
+}
+
+// processVideo generates a video through the dispatcher, downloads the bytes
+// when only a CDN URL is returned, and stores them in the media store.
+func (r *Runner) processVideo(ctx context.Context, job jobstore.Job) error {
+	if r.Dispatcher == nil {
+		return errors.New("dispatcher is unavailable")
+	}
+	var req VideoJobRequest
+	if err := json.Unmarshal(job.Payload, &req); err != nil {
+		return fmt.Errorf("decode video job: %w", err)
+	}
+	model := req.Model
+	if model == "" {
+		model = job.Model
+	}
+	if strings.TrimSpace(req.Prompt) == "" {
+		return errors.New("video prompt is required")
+	}
+	resp, err := r.Dispatcher.Video(ctx, provider.VideoRequest{
+		Model:     model,
+		Prompt:    req.Prompt,
+		Duration:  req.Duration,
+		Size:      req.Size,
+		SessionID: req.SessionID,
+	})
+	if err != nil {
+		return err
+	}
+	data := resp.Data
+	mime := resp.MIME
+	if mime == "" {
+		mime = "video/mp4"
+	}
+	if len(data) == 0 && resp.URL != "" {
+		videoBytes, videoMIME, err := downloadUpstreamVideo(ctx, resp.URL)
+		if err != nil {
+			return err
+		}
+		data = videoBytes
+		if videoMIME != "" {
+			mime = videoMIME
+		}
+	}
+	if len(data) == 0 {
+		return errors.New("video provider returned no downloadable bytes")
+	}
+	if r.Files == nil {
+		return errors.New("media store is unavailable")
+	}
+	ext := ".mp4"
+	if strings.Contains(mime, "webm") {
+		ext = ".webm"
+	} else if strings.Contains(mime, "quicktime") || strings.Contains(strings.ToLower(ext), "mov") {
+		ext = ".mov"
+	}
+	fileID, err := r.Files.Save(data, ext)
+	if err != nil {
+		return err
+	}
+	result, _ := json.Marshal(map[string]any{"video_url": "/v1/files/" + fileID, "file_id": fileID, "upstream_url": resp.URL})
+	return r.Jobs.CompleteWithOutput(ctx, job.ID, string(result), fileID, mime)
+}
+
+const maxGeneratedVideoBytes = 100 * 1024 * 1024
+
+// downloadUpstreamVideo fetches generated video bytes from a provider CDN URL.
+func downloadUpstreamVideo(ctx context.Context, rawURL string) ([]byte, string, error) {
+	videoURL, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || videoURL.Scheme != "https" || videoURL.Host == "" {
+		return nil, "", fmt.Errorf("invalid video url")
+	}
+	client := &http.Client{Timeout: 120 * time.Second}
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 4 {
+			return errors.New("video redirect limit exceeded")
+		}
+		if req.URL.Scheme != "https" {
+			return errors.New("video redirect target must be https")
+		}
+		return nil
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, videoURL.String(), nil)
+	if err != nil {
+		return nil, "", err
+	}
+	httpReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, "", fmt.Errorf("video download HTTP %d", resp.StatusCode)
+	}
+	if resp.ContentLength > maxGeneratedVideoBytes {
+		return nil, "", errors.New("video exceeds maximum size")
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxGeneratedVideoBytes+1))
+	if err != nil {
+		return nil, "", err
+	}
+	if int64(len(data)) > maxGeneratedVideoBytes {
+		return nil, "", errors.New("video exceeds maximum size")
+	}
+	mime := strings.TrimSpace(resp.Header.Get("Content-Type"))
+	if mime == "" {
+		mime = "video/mp4"
+	}
+	return data, mime, nil
 }
