@@ -261,18 +261,10 @@ func watchMetaCDP(ctx context.Context, port int, wait time.Duration) (cookieStr,
 		_ = conn.WriteJSON(map[string]any{"id": 1, "method": "Network.enable"})
 		_ = conn.WriteJSON(map[string]any{"id": 2, "method": "Runtime.enable"})
 
-		// 1. Get cookies across all relevant domains
+			// 1. Get all cookies (no domain filter, so .facebook.com / .meta.ai cookies are included)
 		cookieReq := map[string]any{
 			"id":     10,
-			"method": "Network.getCookies",
-			"params": map[string]any{
-				"urls": []string{
-					"https://muse.ai",
-					"https://auth.muse.ai",
-					"https://www.meta.ai",
-					"https://www.facebook.com",
-				},
-			},
+			"method": "Network.getAllCookies",
 		}
 		_ = conn.WriteJSON(cookieReq)
 
@@ -301,7 +293,7 @@ func watchMetaCDP(ctx context.Context, port int, wait time.Duration) (cookieStr,
 		_ = conn.SetReadDeadline(time.Now().Add(wait))
 
 		var foundCookies []string
-		var hasCUser, hasDatr, hasAbraSess, hasXs bool
+		var hasCUser, hasDatr, hasAbraSess, hasXs, hasHatchSess bool
 		var cUserVal string
 
 		for {
@@ -333,6 +325,8 @@ func watchMetaCDP(ctx context.Context, port int, wait time.Duration) (cookieStr,
 							hasAbraSess = true
 						case "xs", "fr":
 							hasXs = true
+						case "hatch_sess", "hatch_gw", "hatch_native_auth_device", "hatch_native_auth_temp":
+							hasHatchSess = true
 						}
 					}
 				}
@@ -391,11 +385,12 @@ func watchMetaCDP(ctx context.Context, port int, wait time.Duration) (cookieStr,
 		}
 
 		// A valid Meta / muse.ai session exists if:
-		// 1) c_user cookie exists (logged in Meta/Facebook account)
-		// 2) abra_sess or meta_ai_session cookie exists
+			// 1) c_user cookie exists (logged in Meta/Facebook account)
+		// 2) abra_sess / meta_ai_session cookie exists
 		// 3) xs + datr pair exists (Facebook session cookies)
-		// 4) a Bearer token or access_token was extracted
-		isAuth := hasCUser || (hasDatr && hasAbraSess) || (hasDatr && hasXs) || len(tokenStr) > 20
+		// 4) hatch_sess cookie exists (muse.ai native session)
+		// 5) a Bearer token or access_token was extracted
+		isAuth := hasCUser || (hasDatr && hasAbraSess) || (hasDatr && hasXs) || hasHatchSess || len(tokenStr) > 20
 
 		if isAuth {
 			if email == "" {
