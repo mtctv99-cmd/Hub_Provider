@@ -291,7 +291,11 @@ async def run_worker():
                 try:
                     while True:
                         msg_raw = await ws.recv()
-                        msg = json.loads(msg_raw)
+                        try:
+                            msg = json.loads(msg_raw)
+                        except json.JSONDecodeError as jde:
+                            logger.warning("Ignoring malformed JSON frame: %s", jde)
+                            continue
                         msg_type = msg.get("type")
 
                         if msg_type == "pong":

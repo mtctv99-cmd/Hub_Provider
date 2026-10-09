@@ -98,7 +98,7 @@ func (s *Supervisor) DiscoverAccounts(ctx context.Context) ([]Account, error) {
 		var state string
 		var updatedAt sql.NullTime
 		if s.db != nil {
-			_ = s.db.QueryRowContext(ctx, `SELECT state, cooldown_until, updated_at FROM account_cooldowns WHERE identity_id=? OR identity_id=? OR identity_id=? LIMIT 1`, accountID, name, email).Scan(&state, &cooldown, &updatedAt)
+			_ = s.db.QueryRowContext(ctx, `SELECT state, cooldown_until, updated_at FROM account_cooldowns WHERE identity_id=? OR identity_id=? OR identity_id=? ORDER BY updated_at DESC LIMIT 1`, accountID, name, email).Scan(&state, &cooldown, &updatedAt)
 		}
 		acc := Account{ID: accountID, Email: email, Status: "READY"}
 		if cooldown.Valid && now.Before(cooldown.Time) {
@@ -282,8 +282,10 @@ func (s *Supervisor) Start(ctx context.Context) {
 				if !s.CanExecute() {
 					continue
 				}
-				accounts, err := s.DiscoverAccounts(ctx)
+				iterCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+				accounts, err := s.DiscoverAccounts(iterCtx)
 				if err != nil {
+					cancel()
 					continue
 				}
 				now := time.Now()
@@ -291,11 +293,12 @@ func (s *Supervisor) Start(ctx context.Context) {
 					if acc.Status == "ACTIVE" && acc.ActiveSince != nil {
 						if now.Sub(*acc.ActiveSince) >= s.cfg.MaxRuntime {
 							log.Printf("[COLAB_SUPERVISOR] account %s reached max runtime (%v); rotating...", acc.ID, s.cfg.MaxRuntime)
-							_ = s.Rotate(ctx)
+							_ = s.Rotate(iterCtx)
 							break
 						}
 					}
 				}
+				cancel()
 			}
 		}
 	}()

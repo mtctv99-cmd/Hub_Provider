@@ -251,6 +251,13 @@ sys.argv = {argv_repr!r}
         LOG.info('Colab worker %s online and registered successfully.', worker_id)
     else:
         LOG.warning('Worker %s did not signal ready within 20 minutes.', worker_id)
+        # ponytail: release GPU on failed start, else quota leaks until manual stop.
+        try:
+            client.unassign(endpoint)
+        except Exception as e:
+            LOG.warning('[%s] unassign on failed start: %s', email, e)
+        stop_event.set()
+        sys.exit(1)
     # Keep main thread alive so daemon keep_alive keeps the assignment from idling out.
     try:
         while not stop_event.is_set():

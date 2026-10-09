@@ -245,6 +245,13 @@ func withMiddleware(next http.Handler, h *Handler, apiKey string, dbKeys *admin.
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				log.Printf("[GATEWAY] panic request_id=%s path=%s: %v", w.Header().Get("X-Request-ID"), r.URL.Path, recovered)
+				if strings.Contains(w.Header().Get("Content-Type"), "text/event-stream") {
+					fmt.Fprintf(w, "data: {\"error\":{\"message\":\"internal server error\",\"type\":\"server_error\",\"code\":\"internal_error\"}}\n\n")
+					if f, ok := w.(http.Flusher); ok {
+						f.Flush()
+					}
+					return
+				}
 				if !responseStarted(w) {
 					writeError(w, http.StatusInternalServerError, "internal server error", "server_error", "internal_error")
 				}

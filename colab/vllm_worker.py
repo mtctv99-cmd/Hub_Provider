@@ -195,7 +195,7 @@ class VLLMWorker:
                             "finish_reason": fr,
                         }))
         except Exception as e:
-            logger.error("HTTP inference failed for %s: %v", req_id, e)
+            logger.error("HTTP inference failed for %s: %s", req_id, e)
             await ws.send(json.dumps({"type": "error", "request_id": req_id, "error": str(e)}))
 
     async def run_direct_vllm_inference(self, req: Dict[str, Any], ws: Any):
@@ -337,7 +337,11 @@ class VLLMWorker:
                     try:
                         while True:
                             msg_raw = await ws.recv()
-                            msg = json.loads(msg_raw)
+                            try:
+                                msg = json.loads(msg_raw)
+                            except json.JSONDecodeError as jde:
+                                logger.warning("Ignoring malformed JSON frame: %s", jde)
+                                continue
                             typ = msg.get("type")
                             if typ == "pong":
                                 continue

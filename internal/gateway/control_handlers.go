@@ -15,6 +15,9 @@ func (h *Handler) ColabAccounts(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
+	if !h.requireAdmin(w, r) {
+		return
+	}
 	workers := []any{}
 	if h.Workers != nil {
 		for _, worker := range h.Workers.Snapshot() {

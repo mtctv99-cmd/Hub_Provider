@@ -67,6 +67,9 @@ func (h *Handler) AnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		resp.Usage = provider.ComputeUsage(chatReq.Messages, chatReq.Tools, resp.Content, resp.ReasoningContent, resp.ToolCalls, &resp.Usage)
 		h.AITokens.Add(uint64(resp.Usage.TotalTokens))
+		if h.Traffic != nil && resp.Usage.TotalTokens > 0 {
+			go func(tok int) { _ = h.Traffic.RecordMetrics(context.Background(), time.Now(), 0, int64(tok), 0) }(resp.Usage.TotalTokens)
+		}
 	}
 	if err != nil {
 		status, msg, code := maskProviderError(err)

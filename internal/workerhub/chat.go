@@ -18,7 +18,11 @@ func (h *Hub) Available(model string) bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for _, w := range h.workers {
-		if !w.closed && w.canServe(model) {
+		w.mu.Lock()
+		closed := w.closed
+		canServe := w.canServe(model)
+		w.mu.Unlock()
+		if !closed && canServe {
 			return true
 		}
 	}

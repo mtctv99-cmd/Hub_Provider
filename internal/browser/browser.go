@@ -215,18 +215,22 @@ func (m *Manager) StartAutoLogin(accountID, targetURL string) (string, error) {
 	}
 	m.mu.Unlock()
 
-	cmd := exec.Command(browserPath,
+	args := []string{
 		fmt.Sprintf("--remote-debugging-port=%d", cdpPort),
 		"--remote-debugging-address=127.0.0.1",
-		"--user-data-dir="+profileDir,
+		"--user-data-dir=" + profileDir,
 		"--no-first-run",
 		"--no-default-browser-check",
-		"--no-sandbox",
 		"--disable-gpu",
 		"--disable-dev-shm-usage",
 		"--disable-blink-features=AutomationControlled",
-		targetURL,
-	)
+	}
+	if runtime.GOOS == "linux" && os.Geteuid() == 0 {
+		args = append(args, "--no-sandbox")
+	}
+	args = append(args, targetURL)
+
+	cmd := exec.Command(browserPath, args...)
 
 	if err := cmd.Start(); err != nil {
 		m.running.Store(false)
@@ -269,7 +273,15 @@ func (m *Manager) OpenProfile(accountID, targetURL string) error {
 		"--disable-blink-features=AutomationControlled",
 		targetURL,
 	)
-	return cmd.Start()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	// ponytail: reap zombie + clear SingletonLock so refresh-cdp never wedges on defunct PID.
+	go func() {
+		_ = cmd.Wait()
+		cleanSingletonLocks(profileDir)
+	}()
+	return nil
 }
 
 func (m *Manager) monitorLogin(ctx context.Context, cmd *exec.Cmd, cdpPort int, accountID, profileDir string) {
@@ -294,6 +306,7 @@ func (m *Manager) monitorLogin(ctx context.Context, cmd *exec.Cmd, cdpPort int, 
 	for {
 		select {
 		case <-ctx.Done():
+			terminateBrowserProcess(cmd)
 			return
 		case <-cmdDone:
 			return

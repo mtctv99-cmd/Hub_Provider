@@ -21,18 +21,33 @@ func NewTrafficStore(db *sql.DB) *TrafficStore {
 }
 
 func (s *TrafficStore) Record(ctx context.Context, at time.Time, duration time.Duration) error {
-	return s.RecordMetrics(ctx, at, duration, 0, 0)
+	return s.recordHourly(ctx, at, 1, duration, 0, 0)
 }
 
 func (s *TrafficStore) RecordMetrics(ctx context.Context, at time.Time, duration time.Duration, tokens int64, audioSec int64) error {
+	reqCount := int64(0)
+	if duration > 0 {
+		reqCount = 1
+	}
+	return s.recordHourly(ctx, at, reqCount, duration, tokens, audioSec)
+}
+
+func (s *TrafficStore) recordHourly(ctx context.Context, at time.Time, requestCount int64, duration time.Duration, tokens int64, audioSec int64) error {
 	if s == nil || s.db == nil {
 		return nil
 	}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO request_traffic_hourly(hour_start, request_count, duration_ms, tokens, audio_sec)
-		VALUES (?, 1, ?, ?, ?) ON CONFLICT(hour_start) DO UPDATE SET
-			request_count=request_count+1, duration_ms=duration_ms+excluded.duration_ms,
-			tokens=tokens+excluded.tokens, audio_sec=audio_sec+excluded.audio_sec`,
-		at.UTC().Truncate(time.Hour).Unix(), duration.Milliseconds(), tokens, audioSec)
+		VALUES (?, ?, ?, ?, ?) ON CONFLICT(hour_start) DO UPDATE SET
+			request_count=request_count+excluded.request_count,
+			duration_ms=duration_ms+excluded.duration_ms,
+			tokens=tokens+excluded.tokens,
+			audio_sec=audio_sec+excluded.audio_sec`,
+		at.UTC().Truncate(time.Hour).Unix(), requestCount, duration.Milliseconds(), tokens, audioSec)
 	return err
 }
 
