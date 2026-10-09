@@ -36,13 +36,13 @@ func (h *Handler) streamColab(w http.ResponseWriter, ctx context.Context, req pr
 		writeError(w, 500, "streaming unsupported", "server_error", "streaming_unsupported")
 		return
 	}
-		stream, err := h.Workers.StreamChat(ctx, req)
-		if err != nil {
-			log.Printf("[GATEWAY] colab streamChat failed: %v", err)
-			status, msg, code := maskColabError(err)
-			writeError(w, status, msg, "provider_error", code)
-			return
-		}
+	stream, err := h.Workers.StreamChat(ctx, req)
+	if err != nil {
+		log.Printf("[GATEWAY] colab streamChat failed: %v", err)
+		status, msg, code := maskColabError(err)
+		writeError(w, status, msg, "provider_error", code)
+		return
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -68,14 +68,16 @@ func (h *Handler) streamColab(w http.ResponseWriter, ctx context.Context, req pr
 				flusher.Flush()
 				return
 			}
-				if chunk.Err != nil {
-					log.Printf("[GATEWAY] colab chunk error: %v", chunk.Err)
-					_, msg, code := maskColabError(chunk.Err)
-					send(ErrorEnvelope{Error: APIError{Message: msg, Type: "provider_error", Code: code}})
-					return
-				}
+			if chunk.Err != nil {
+				log.Printf("[GATEWAY] colab chunk error: %v", chunk.Err)
+				_, msg, code := maskColabError(chunk.Err)
+				send(ErrorEnvelope{Error: APIError{Message: msg, Type: "provider_error", Code: code}})
+				return
+			}
 			finish := (*string)(nil)
-			if chunk.Done {
+			if chunk.FinishReason != "" {
+				finish = &chunk.FinishReason
+			} else if chunk.Done {
 				value := "stop"
 				finish = &value
 				completed = true
@@ -95,14 +97,27 @@ func (h *Handler) streamColab(w http.ResponseWriter, ctx context.Context, req pr
 				send(ErrorEnvelope{Error: APIError{Message: msg, Type: "provider_error", Code: code}})
 				return
 			}
+			var finalUsage provider.Usage
+			if chunk.Usage != nil {
+				finalUsage = *chunk.Usage
+			}
 			if chunk.Done {
 				toks := provider.ComputeUsage(req.Messages, req.Tools, streamContent.String(), streamReasoning.String(), streamToolCalls, streamUsage)
 				h.AITokens.Add(uint64(toks.TotalTokens))
 				if h.Traffic != nil && toks.TotalTokens > 0 {
 					go func(tok int) { _ = h.Traffic.RecordMetrics(context.Background(), time.Now(), 0, int64(tok), 0) }(toks.TotalTokens)
 				}
+				if finalUsage == (provider.Usage{}) {
+					finalUsage = toks
+				}
 			}
-			send(ChatCompletionResponse{ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model, Choices: []Choice{{Index: 0, Delta: &provider.Message{Role: "assistant", Content: chunk.Content}, FinishReason: finish}}, Usage: usageOrEmpty(chunk.Usage)})
+			delta := &provider.Message{Role: "assistant", Content: chunk.Content, ReasoningContent: chunk.ReasoningContent, ToolCalls: chunk.ToolCalls}
+			send(ChatCompletionResponse{ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model, Choices: []Choice{{Index: 0, Delta: delta, FinishReason: finish}}, Usage: finalUsage})
+			if chunk.Done {
+				fmt.Fprint(w, "data: [DONE]\n\n")
+				flusher.Flush()
+				return
+			}
 		}
 	}
 }

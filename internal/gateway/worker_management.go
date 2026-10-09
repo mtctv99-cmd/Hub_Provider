@@ -150,6 +150,28 @@ func (h *Handler) AdminWorkerAction(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"command_executed": true, "worker_connected": false})
 		return
 	}
+	if action == "colab/stop" {
+		if h.ColabSupervisor == nil || !h.ColabSupervisor.CanExecute() {
+			writeError(w, http.StatusNotImplemented, "Colab supervisor command is not configured", "provider_error", "colab_supervisor_unavailable")
+			return
+		}
+		var req struct {
+			AccountID string `json:"account_id"`
+		}
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		if strings.TrimSpace(req.AccountID) == "" {
+			writeError(w, http.StatusBadRequest, "account_id is required", "invalid_request_error", "missing_account_id")
+			return
+		}
+		if err := h.ColabSupervisor.StopAccount(r.Context(), req.AccountID); err != nil {
+			writeError(w, http.StatusBadGateway, "Colab supervisor command failed", "provider_error", "colab_stop_failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"command_executed": true})
+		return
+	}
 	if !strings.HasSuffix(action, "/disconnect") {
 		writeError(w, http.StatusNotFound, "worker action not found", "invalid_request_error", "not_found")
 		return

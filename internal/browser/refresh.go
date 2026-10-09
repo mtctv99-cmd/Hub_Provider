@@ -60,7 +60,7 @@ func (m *Manager) RefreshAccountFromProfileContext(ctx context.Context, accountI
 		if err != nil {
 			return "", err
 		}
-		cmd := exec.CommandContext(ctx, browser, "--headless=new", fmt.Sprintf("--remote-debugging-port=%d", port), "--remote-debugging-address=127.0.0.1", "--user-data-dir="+profile, "--no-first-run", "--no-default-browser-check", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "https://gemini.google.com/app")
+		cmd := exec.CommandContext(ctx, browser, "--headless=new", fmt.Sprintf("--remote-debugging-port=%d", port), "--remote-debugging-address=127.0.0.1", "--user-data-dir="+profile, "--no-first-run", "--no-default-browser-check", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled", "https://gemini.google.com/app")
 		if err := cmd.Start(); err != nil {
 			return "", fmt.Errorf("start refresh browser: %w", err)
 		}

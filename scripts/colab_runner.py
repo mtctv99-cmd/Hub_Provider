@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """CLI Bridge for Colab Supervisor actions (start, stop, rotate).
 
 Invoked by Sever_provider's Go colabsupervisor module when
@@ -5,9 +6,9 @@ COLAB_SUPERVISOR_CMD is configured:
   python scripts/colab_runner.py <action> <account_id>
 
 Actions:
-  start  - Allocates a T4 GPU notebook for the specified Google account and launches worker
-  stop   - Terminates the active Colab session for the account
-  rotate - Gracefully switches from the expiring account to the next eligible account
+  start  - Allocates a T4 GPU notebook, injects worker code (vLLM or llama.cpp), and starts worker
+  stop   - Terminates and unassigns active Colab session for the account
+  rotate - Gracefully stops the current account and starts next eligible account
 """
 import argparse
 import base64
@@ -16,28 +17,31 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
+import uuid
 from pathlib import Path
 
 LOG = logging.getLogger('colab_runner')
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-COLAB_WORKER_SCRIPT = REPO_ROOT / 'colab' / 'combined_worker.py'
+REMOTE_WORKER_SCRIPT = REPO_ROOT / 'colab' / 'remote_worker.py'
+VLLM_WORKER_SCRIPT = REPO_ROOT / 'colab' / 'vllm_worker.py'
 
-
-DEFAULT_REPO_ID = 'llmfan46/gemma-4-E2B-it-ultra-uncensored-heretic-GGUF'
-DEFAULT_FILENAME = 'gemma-4-E2B-it-ultra-uncensored-heretic-Q4_K_M.gguf'
-DEFAULT_MMPROJ = 'gemma-4-E2B-it-mmproj-BF16.gguf'
-DEFAULT_TTS_CONCURRENCY = 20
+DEFAULT_MODEL = os.environ.get('COLAB_MODEL', 'google/gemma-4-E4B-it')
+DEFAULT_REPO_ID = 'unsloth/gemma-4-E4B-it-GGUF'
+DEFAULT_FILENAME = 'gemma-4-E4B-it-Q4_K_M.gguf'
+DEFAULT_MMPROJ = 'mmproj-F16.gguf'
+DEFAULT_LLM_NAME = 'gemma4-e4b'
 DEFAULT_CONTEXT_SIZE = 32768
-DEFAULT_LLM_CONCURRENCY = 4
+DEFAULT_LLM_CONCURRENCY = 8
 
 
 def check_warp_proxy():
     try:
         r = subprocess.run(['warp-cli', 'status'], capture_output=True, text=True, timeout=3)
         if 'Connected' in r.stdout:
-            LOG.info('WARP proxy active, using SOCKS5 127.0.0.1:40000')
+            LOG.info('WARP proxy active, routing via socks5://127.0.0.1:40000')
             return {
                 'http': 'socks5://127.0.0.1:40000',
                 'https': 'socks5://127.0.0.1:40000',
@@ -61,31 +65,199 @@ def resolve_token_file(token_dir, account_id):
     return None
 
 
-def do_start(account_id, token_dir, server_url, worker_token, mmproj=DEFAULT_MMPROJ,
-             tts_concurrency=DEFAULT_TTS_CONCURRENCY, context_size=DEFAULT_CONTEXT_SIZE,
-             llm_concurrency=DEFAULT_LLM_CONCURRENCY):
+def get_account_email(account_id, token_file):
+    name = account_id.removeprefix('colab-')
+    if '@' in name:
+        return name
+    if '_at_' in name:
+        parts = name.split('_at_', 1)
+        return parts[0] + '@' + parts[1].replace('_', '.')
+    try:
+        with open(token_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            if 'client_email' in data:
+                return data['client_email']
+    except Exception:
+        pass
+    return name
+
+
+def get_client(token_file):
+    from google.oauth2.credentials import Credentials
+    from google.auth.transport.requests import Request, AuthorizedSession
+    from colab_cli.client import Client, Prod
+
+    proxies = check_warp_proxy()
+    with open(token_file, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    creds = Credentials.from_authorized_user_info(data)
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+    sess = AuthorizedSession(creds)
+    if proxies:
+        sess.proxies.update(proxies)
+    return Client(Prod, session=sess)
+
+
+def do_start(account_id, token_dir, server_url, worker_token, worker_type='vllm',
+             context_size=DEFAULT_CONTEXT_SIZE, llm_concurrency=DEFAULT_LLM_CONCURRENCY,
+             repo_id=None, filename=None, mmproj=None, model_name=None, aliases=None):
     token_file = resolve_token_file(token_dir, account_id)
     if not token_file:
         LOG.error('Token file not found for account %s in %s', account_id, token_dir)
         sys.exit(1)
 
-    LOG.info('Starting Colab instance for %s using %s (ctx: %d, llm_concurrency: %d, mmproj: %s, tts_concurrency: %s)',
-             account_id, token_file.name, context_size, llm_concurrency, mmproj, tts_concurrency)
+    email = get_account_email(account_id, token_file)
+    LOG.info('Starting Colab worker for %s (email: %s, type: %s)', account_id, email, worker_type)
+
     try:
-        from google.oauth2.credentials import Credentials
-        from colab_cli.client import Client, Variant, Accelerator
+        from colab_cli.client import Variant, Accelerator
+        from colab_cli.runtime import ColabRuntime
     except ImportError:
-        LOG.warning('colab_cli or google-auth not installed in local environment; dry-run/mock confirmation')
+        LOG.warning('colab_cli not installed in local environment; dry-run mode')
         return
 
-    # In production with colab_cli installed:
-    proxies = check_warp_proxy()
-    with open(token_file, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-    creds = Credentials.from_authorized_user_info(data)
-    client = Client(creds=creds, proxies=proxies)
-    assigned = client.assign(variant=Variant.GPU, accelerator=Accelerator.T4)
-    LOG.info('Assigned T4 notebook instance: %s', assigned)
+    client = get_client(token_file)
+
+    # 1. Clean up stale notebook assignments
+    try:
+        for a in client.list_assignments():
+            try:
+                LOG.info('[%s] Unassigning stale notebook: %s', email, a.endpoint)
+                client.unassign(a.endpoint)
+            except Exception:
+                pass
+    except Exception as e:
+        LOG.warning('[%s] list_assignments warning: %s', email, e)
+
+    # 2. Assign fresh T4 GPU session
+    LOG.info('[%s] Requesting fresh T4 GPU session from Google Colab...', email)
+    active_assignment = client.assign(uuid.uuid4(), variant=Variant.GPU, accelerator=Accelerator.T4)
+    LOG.info('[%s] Session assigned: %s', email, active_assignment.endpoint)
+
+    url = active_assignment.runtime_proxy_info.url
+    proxy_token = active_assignment.runtime_proxy_info.token
+    endpoint = active_assignment.endpoint
+    runtime = ColabRuntime(url, proxy_token)
+
+    worker_id = f"colab-{uuid.uuid4().hex[:6]}"
+
+    # Pick script to inject
+    target_script = VLLM_WORKER_SCRIPT if worker_type == 'vllm' and VLLM_WORKER_SCRIPT.is_file() else REMOTE_WORKER_SCRIPT
+    with open(target_script, 'r', encoding='utf-8') as f:
+        script_code = f.read()
+
+    hf_token = os.environ.get('HF_TOKEN', '')
+    if worker_type == 'vllm':
+        argv_repr = [
+            'vllm_worker',
+            '--server', str(server_url),
+            '--worker-id', str(worker_id),
+            '--token', str(worker_token),
+            '--model', DEFAULT_MODEL,
+            '--concurrency', str(llm_concurrency),
+            '--max-len', str(context_size),
+        ]
+    else:
+        argv_repr = [
+            'remote_worker',
+            '--server-url', str(server_url),
+            '--worker-id', str(worker_id),
+            '--api-key', str(worker_token),
+            '--repo-id', repo_id or DEFAULT_REPO_ID,
+            '--filename', filename or DEFAULT_FILENAME,
+            '--mmproj', mmproj or DEFAULT_MMPROJ,
+            '--model-name', model_name or DEFAULT_LLM_NAME,
+            '--n-ctx', str(context_size),
+            '--flash-attn',
+        ]
+        for alias in (aliases or []):
+            argv_repr += ['--alias', str(alias)]
+
+    bootstrap = ''
+    if worker_type == 'vllm':
+        # Colab runtime does not ship vllm; install before the worker imports it.
+        bootstrap = """
+import importlib.util, subprocess, sys
+if importlib.util.find_spec('vllm') is None:
+    print('Installing vllm...', flush=True)
+    subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', 'vllm'])
+if importlib.util.find_spec('websockets') is None:
+    subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', 'websockets'])
+if importlib.util.find_spec('nest_asyncio') is None:
+    subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', 'nest_asyncio'])
+print('vllm bootstrap done.', flush=True)
+"""
+
+    injected_code = f"""# === Injected by Sever_provider Launcher ===
+import os
+import sys
+HF_TOKEN = {hf_token!r}
+if HF_TOKEN:
+    os.environ["HF_TOKEN"] = HF_TOKEN
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+sys.argv = {argv_repr!r}
+# ============================================
+""" + bootstrap + script_code
+
+    stop_event = threading.Event()
+    ready_event = threading.Event()
+
+    def run_worker():
+        try:
+            def output_hook(out):
+                if out.get('output_type') == 'stream':
+                    text = out.get('text', '').strip()
+                    if text:
+                        LOG.info('[%s] Colab: %s', email, text[:200])
+                        if 'Connected' in text or 'Registered' in text or 'Model loaded' in text:
+                            ready_event.set()
+                elif out.get('output_type') == 'error':
+                    tb = ''.join(out.get('traceback', []))
+                    LOG.error('[%s] Colab error: %s', email, tb[-1500:])
+
+            runtime.execute_code(injected_code, timeout=1800, output_hook=output_hook)
+        except Exception as e:
+            if not stop_event.is_set():
+                LOG.error('[%s] Execution error: %s', email, e)
+        finally:
+            stop_event.set()
+
+    def keep_alive():
+        fails = 0
+        while not stop_event.is_set():
+            if stop_event.wait(120):
+                break
+            try:
+                client.keep_alive_assignment(endpoint)
+                fails = 0
+            except Exception as e:
+                fails += 1
+                LOG.warning('[%s] Keep-alive error (%d/3): %s', email, fails, e)
+                if fails >= 3:
+                    LOG.error('[%s] Keep-alive failed 3x, terminating', email)
+                    stop_event.set()
+                    break
+
+    worker_thread = threading.Thread(target=run_worker, daemon=True)
+    ka_thread = threading.Thread(target=keep_alive, daemon=True)
+    worker_thread.start()
+    ka_thread.start()
+
+    LOG.info('[%s] Waiting for Colab worker to register with Server...', email)
+    # vllm bootstrap install + model load can take 10-20 minutes on fresh T4 VM.
+    ready_event.wait(timeout=1200.0)
+    if ready_event.is_set():
+        LOG.info('Colab worker %s online and registered successfully.', worker_id)
+    else:
+        LOG.warning('Worker %s did not signal ready within 20 minutes.', worker_id)
+    # Keep main thread alive so daemon keep_alive keeps the assignment from idling out.
+    try:
+        while not stop_event.is_set():
+            time.sleep(30)
+    except KeyboardInterrupt:
+        LOG.info('Stopping worker on interrupt...')
+        stop_event.set()
 
 
 def do_stop(account_id, token_dir):
@@ -93,7 +265,22 @@ def do_stop(account_id, token_dir):
     if not token_file:
         LOG.warning('Token file not found for %s, skipping stop', account_id)
         return
-    LOG.info('Stopping Colab session for %s', account_id)
+
+    email = get_account_email(account_id, token_file)
+    LOG.info('Stopping Colab session for %s (%s)', account_id, email)
+
+    try:
+        client = get_client(token_file)
+        assignments = client.list_assignments()
+        for a in assignments:
+            try:
+                LOG.info('[%s] Unassigning notebook endpoint: %s', email, a.endpoint)
+                client.unassign(a.endpoint)
+            except Exception as e:
+                LOG.warning('[%s] Error unassigning %s: %s', email, a.endpoint, e)
+        LOG.info('Colab sessions stopped for %s.', email)
+    except Exception as e:
+        LOG.warning('Error stopping Colab session for %s: %s', email, e)
 
 
 def main():
@@ -101,23 +288,36 @@ def main():
     parser.add_argument('action', choices=['start', 'stop', 'rotate'])
     parser.add_argument('account_id')
     parser.add_argument('--token-dir', default=os.environ.get('COLAB_TOKEN_DIR') or str(Path.home() / '.config' / 'colab-cli'))
-    parser.add_argument('--server', default=os.environ.get('PIPER_SERVER_URL') or 'ws://127.0.0.1:18080/api/llm/ws/worker')
-    parser.add_argument('--token', default=os.environ.get('WORKER_TOKEN') or os.environ.get('COLAB_WORKER_KEY') or '')
-    parser.add_argument('--mmproj', default=DEFAULT_MMPROJ, help='Multimodal projector file (default: gemma-4-E2B-it-mmproj-BF16.gguf)')
-    parser.add_argument('--context-size', type=int, default=DEFAULT_CONTEXT_SIZE, help='Context window size (default: 32768 / 32k)')
-    parser.add_argument('--llm-concurrency', type=int, default=DEFAULT_LLM_CONCURRENCY, help='Max concurrent LLM requests (default: 4)')
-    parser.add_argument('--tts-concurrency', type=int, default=DEFAULT_TTS_CONCURRENCY, help='Number of parallel TTS worker slots (default: 10)')
+    parser.add_argument('--server', default=os.environ.get('COLAB_SERVER_URL') or os.environ.get('PIPER_SERVER_URL') or 'ws://127.0.0.1:18080/api/llm/ws/worker')
+    parser.add_argument('--token', default=os.environ.get('WORKER_TOKEN') or os.environ.get('WORKER_AUTH_TOKEN') or 'omni-secret-key-123')
+    parser.add_argument('--worker-type', default=os.environ.get('COLAB_WORKER_TYPE', 'vllm'), choices=['vllm', 'llama'])
+    parser.add_argument('--context-size', type=int, default=DEFAULT_CONTEXT_SIZE)
+    parser.add_argument('--llm-concurrency', type=int, default=DEFAULT_LLM_CONCURRENCY)
+    parser.add_argument('--repo-id', default=None, help='GGUF repo (llama worker)')
+    parser.add_argument('--filename', default=None, help='GGUF file (llama worker)')
+    parser.add_argument('--mmproj', default=None, help='Vision mmproj file (llama worker)')
+    parser.add_argument('--model-name', default=None, help='Primary model id registered to the hub')
+    parser.add_argument('--alias', action='append', default=[], help='Extra hub model alias (repeatable)')
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
     LOG.info('Colab action: %s for %s', args.action, args.account_id)
 
-    if args.action in ('start', 'rotate'):
+    if args.action == 'start':
         do_start(args.account_id, args.token_dir, args.server, args.token,
-                 mmproj=args.mmproj, context_size=args.context_size,
-                 llm_concurrency=args.llm_concurrency, tts_concurrency=args.tts_concurrency)
+                 worker_type=args.worker_type, context_size=args.context_size,
+                 llm_concurrency=args.llm_concurrency, repo_id=args.repo_id,
+                 filename=args.filename, mmproj=args.mmproj,
+                 model_name=args.model_name, aliases=args.alias)
     elif args.action == 'stop':
         do_stop(args.account_id, args.token_dir)
+    elif args.action == 'rotate':
+        do_stop(args.account_id, args.token_dir)
+        do_start(args.account_id, args.token_dir, args.server, args.token,
+                 worker_type=args.worker_type, context_size=args.context_size,
+                 llm_concurrency=args.llm_concurrency, repo_id=args.repo_id,
+                 filename=args.filename, mmproj=args.mmproj,
+                 model_name=args.model_name, aliases=args.alias)
 
 
 if __name__ == '__main__':

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"strings"
@@ -24,11 +25,12 @@ const (
 )
 
 type Config struct {
-	TokenDir   string
-	Command    string
-	MaxRuntime time.Duration
-	Prewarm    time.Duration
-	Cooldown   time.Duration
+	TokenDir       string
+	Command        string
+	MaxRuntime     time.Duration
+	Prewarm        time.Duration
+	Cooldown       time.Duration
+	CommandTimeout time.Duration
 }
 
 type Account struct {
@@ -86,17 +88,27 @@ func (s *Supervisor) DiscoverAccounts(ctx context.Context) ([]Account, error) {
 		}
 		name := strings.TrimSuffix(strings.TrimPrefix(entry.Name(), "token_"), ".json")
 		email := name
+		if strings.Contains(name, "_at_") {
+			parts := strings.SplitN(name, "_at_", 2)
+			email = parts[0] + "@" + strings.ReplaceAll(parts[1], "_", ".")
+		}
 		accountID := "colab-" + name
 
 		var cooldown sql.NullTime
 		var state string
+		var updatedAt sql.NullTime
 		if s.db != nil {
-			_ = s.db.QueryRowContext(ctx, `SELECT state, cooldown_until FROM account_cooldowns WHERE identity_id=?`, accountID).Scan(&state, &cooldown)
+			_ = s.db.QueryRowContext(ctx, `SELECT state, cooldown_until, updated_at FROM account_cooldowns WHERE identity_id=? OR identity_id=? OR identity_id=? LIMIT 1`, accountID, name, email).Scan(&state, &cooldown, &updatedAt)
 		}
 		acc := Account{ID: accountID, Email: email, Status: "READY"}
 		if cooldown.Valid && now.Before(cooldown.Time) {
 			acc.Status = "COOLDOWN"
 			acc.CooldownUntil = &cooldown.Time
+		} else if state == "ACTIVE" {
+			acc.Status = "ACTIVE"
+			if updatedAt.Valid {
+				acc.ActiveSince = &updatedAt.Time
+			}
 		}
 		accounts = append(accounts, acc)
 	}
@@ -109,22 +121,64 @@ func (s *Supervisor) RecordCooldown(ctx context.Context, accountID string, durat
 		return nil
 	}
 	until := time.Now().Add(duration)
+	rawName := strings.TrimPrefix(accountID, "colab-")
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO account_cooldowns(identity_id, state, cooldown_until, updated_at)
-		VALUES (?, 'COOLDOWN', ?, CURRENT_TIMESTAMP)
-		ON CONFLICT(identity_id) DO UPDATE SET
-			state='COOLDOWN',
-			cooldown_until=excluded.cooldown_until,
-			updated_at=CURRENT_TIMESTAMP`,
+			INSERT INTO account_cooldowns(identity_id, state, cooldown_until, updated_at)
+			VALUES (?, 'COOLDOWN', ?, CURRENT_TIMESTAMP)
+			ON CONFLICT(identity_id) DO UPDATE SET
+				state='COOLDOWN',
+				cooldown_until=excluded.cooldown_until,
+				updated_at=CURRENT_TIMESTAMP`,
 		accountID, until)
+	if err != nil {
+		_, err = s.db.ExecContext(ctx, `
+				INSERT INTO account_cooldowns(identity_id, state, cooldown_until, updated_at)
+				VALUES (?, 'COOLDOWN', ?, CURRENT_TIMESTAMP)
+				ON CONFLICT(identity_id) DO UPDATE SET
+					state='COOLDOWN',
+					cooldown_until=excluded.cooldown_until,
+					updated_at=CURRENT_TIMESTAMP`,
+			rawName, until)
+	}
 	return err
 }
 
-// Rotate triggers rotation to the next available Colab account.
+// RecordActive marks an account as currently ACTIVE.
+func (s *Supervisor) RecordActive(ctx context.Context, accountID string) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	rawName := strings.TrimPrefix(accountID, "colab-")
+	_, err := s.db.ExecContext(ctx, `
+			INSERT INTO account_cooldowns(identity_id, state, cooldown_until, updated_at)
+			VALUES (?, 'ACTIVE', NULL, CURRENT_TIMESTAMP)
+			ON CONFLICT(identity_id) DO UPDATE SET
+				state='ACTIVE',
+				cooldown_until=NULL,
+				updated_at=CURRENT_TIMESTAMP`,
+		accountID)
+	if err != nil {
+		_, err = s.db.ExecContext(ctx, `
+				INSERT INTO account_cooldowns(identity_id, state, cooldown_until, updated_at)
+				VALUES (?, 'ACTIVE', NULL, CURRENT_TIMESTAMP)
+				ON CONFLICT(identity_id) DO UPDATE SET
+					state='ACTIVE',
+					cooldown_until=NULL,
+					updated_at=CURRENT_TIMESTAMP`,
+			rawName)
+	}
+	return err
+}
+
+// Rotate triggers rotation: stops current active account(s), puts them in cooldown,
+// and starts the next eligible READY account as ACTIVE.
 func (s *Supervisor) Rotate(ctx context.Context) error {
 	if !s.Configured() {
 		return ErrNotConfigured
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	accounts, err := s.DiscoverAccounts(ctx)
 	if err != nil {
 		return err
@@ -139,10 +193,23 @@ func (s *Supervisor) Rotate(ctx context.Context) error {
 	if eligible == nil {
 		return ErrNoAccountAvailable
 	}
-	if err := s.runCommand(ctx, "rotate", eligible.ID); err != nil {
+
+	// 1. Retire any active accounts and enter cooldown
+	for _, acc := range accounts {
+		if acc.Status == "ACTIVE" && acc.ID != eligible.ID {
+			_ = s.runCommand(ctx, "stop", acc.ID)
+			_ = s.RecordCooldown(ctx, acc.ID, s.cfg.Cooldown)
+		}
+	}
+
+	// 2. Start eligible account
+	if err := s.runCommand(ctx, "start", eligible.ID); err != nil {
+		_ = s.RecordCooldown(ctx, eligible.ID, 3*time.Minute)
 		return err
 	}
-	return s.RecordCooldown(ctx, eligible.ID, s.cfg.Cooldown)
+
+	// 3. Mark newly allocated account as ACTIVE
+	return s.RecordActive(ctx, eligible.ID)
 }
 
 func (s *Supervisor) StartAccount(ctx context.Context, accountID string) error {
@@ -152,7 +219,12 @@ func (s *Supervisor) StartAccount(ctx context.Context, accountID string) error {
 	if strings.TrimSpace(accountID) == "" {
 		return errors.New("account id is required")
 	}
-	return s.runCommand(ctx, "start", accountID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.runCommand(ctx, "start", accountID); err != nil {
+		return err
+	}
+	return s.RecordActive(ctx, accountID)
 }
 
 func (s *Supervisor) StopAccount(ctx context.Context, accountID string) error {
@@ -162,7 +234,12 @@ func (s *Supervisor) StopAccount(ctx context.Context, accountID string) error {
 	if strings.TrimSpace(accountID) == "" {
 		return errors.New("account id is required")
 	}
-	return s.runCommand(ctx, "stop", accountID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.runCommand(ctx, "stop", accountID); err != nil {
+		return err
+	}
+	return s.RecordCooldown(ctx, accountID, s.cfg.Cooldown)
 }
 
 func (s *Supervisor) runCommand(ctx context.Context, action, accountID string) error {
@@ -175,7 +252,11 @@ func (s *Supervisor) runCommand(ctx context.Context, action, accountID string) e
 			return errors.New("unsafe supervisor command")
 		}
 	}
-	cmdCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	timeout := 300 * time.Second
+	if s.cfg.CommandTimeout > 0 {
+		timeout = s.cfg.CommandTimeout
+	}
+	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(cmdCtx, parts[0], append(parts[1:], action, accountID)...)
 	cmd.Env = append(os.Environ(), "COLAB_ACCOUNT_ID="+accountID, "COLAB_ACTION="+action)
@@ -185,7 +266,7 @@ func (s *Supervisor) runCommand(ctx context.Context, action, accountID string) e
 	return nil
 }
 
-// Start runs a lightweight maintenance loop. It does not read token contents.
+// Start runs a maintenance loop to check account runtime and auto-rotate when MaxRuntime expires.
 func (s *Supervisor) Start(ctx context.Context) {
 	if s == nil {
 		return
@@ -198,7 +279,23 @@ func (s *Supervisor) Start(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				_, _ = s.DiscoverAccounts(ctx)
+				if !s.CanExecute() {
+					continue
+				}
+				accounts, err := s.DiscoverAccounts(ctx)
+				if err != nil {
+					continue
+				}
+				now := time.Now()
+				for _, acc := range accounts {
+					if acc.Status == "ACTIVE" && acc.ActiveSince != nil {
+						if now.Sub(*acc.ActiveSince) >= s.cfg.MaxRuntime {
+							log.Printf("[COLAB_SUPERVISOR] account %s reached max runtime (%v); rotating...", acc.ID, s.cfg.MaxRuntime)
+							_ = s.Rotate(ctx)
+							break
+						}
+					}
+				}
 			}
 		}
 	}()

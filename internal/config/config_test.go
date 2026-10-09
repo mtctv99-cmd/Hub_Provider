@@ -44,3 +44,36 @@ func TestConfigEnvOverrides(t *testing.T) {
 		t.Errorf("leaseReclaimInterval=%d, want 30", cfg.Server.LeaseReclaimInterval)
 	}
 }
+
+func TestGemma4ModelsLoaded(t *testing.T) {
+	cfg, err := Load("../../config")
+	if err != nil {
+		t.Fatalf("Load config failed: %v", err)
+	}
+	expectedModels := []string{
+		"gemma4-e4b",
+		"gemma-4-colab",
+	}
+	expectedCaps := []string{"chat", "streaming", "vision", "reasoning"}
+	for _, m := range expectedModels {
+		spec, ok := cfg.Models[m]
+		if !ok {
+			t.Fatalf("model %s not found in models.yaml", m)
+		}
+		if spec.Provider != "google_colab" {
+			t.Errorf("model %s provider=%s, want google_colab", m, spec.Provider)
+		}
+		if spec.TimeoutSec != 180 {
+			t.Errorf("model %s timeout_sec=%d, want 180", m, spec.TimeoutSec)
+		}
+		capMap := make(map[string]bool)
+		for _, c := range spec.Capabilities {
+			capMap[c] = true
+		}
+		for _, c := range expectedCaps {
+			if !capMap[c] {
+				t.Errorf("model %s missing capability %s", m, c)
+			}
+		}
+	}
+}

@@ -179,3 +179,32 @@ func TestInboundColabStreamDisconnectDoesNotSignalDone(t *testing.T) {
 		t.Fatalf("unexpected terminal SSE: %s", data)
 	}
 }
+
+func TestInboundColabReasoningContentSSE(t *testing.T) {
+	_, srv, _ := inboundColab(t)
+	ws := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/llm/ws/worker?token=test-worker-secret"
+	worker, _, err := websocket.DefaultDialer.Dial(ws, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Close()
+	worker.WriteJSON(workerhub.Registration{WorkerID: "w1", Model: "gemma-4-colab", MaxConcurrency: 1})
+	var ack map[string]any
+	if err := worker.ReadJSON(&ack); err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan *http.Response, 1)
+	go func() { result <- postColab(t, srv, true) }()
+	var request map[string]any
+	if err := worker.ReadJSON(&request); err != nil {
+		t.Fatal(err)
+	}
+	worker.WriteJSON(map[string]any{"type": "token", "request_id": request["request_id"], "delta": "result"})
+	worker.WriteJSON(map[string]any{"type": "token_end", "request_id": request["request_id"]})
+	resp := <-result
+	data, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || !strings.Contains(string(data), `"content":"result"`) {
+		t.Fatalf("reasoning stream status=%d body=%s", resp.StatusCode, data)
+	}
+}

@@ -33,6 +33,7 @@ venv/
 .env
 .env.*
 !config/.env.example
+*cookie*.json
 **/cookies.json
 **/*token*.json
 **/*session*.json

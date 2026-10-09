@@ -43,6 +43,16 @@ func validateProfileID(accountID string) error {
 	return nil
 }
 
+func SafeProfileNameForEmail(email string) string {
+	normalized := strings.ToLower(strings.TrimSpace(email))
+	if normalized == "" {
+		return ""
+	}
+	safe := strings.ReplaceAll(normalized, "@", "_at_")
+	safe = strings.ReplaceAll(safe, ".", "_")
+	return "google_" + safe
+}
+
 func AccountIDForEmail(email string) string {
 	normalized := strings.ToLower(strings.TrimSpace(email))
 	if normalized == "" {
@@ -151,7 +161,16 @@ func (m *Manager) StartAutoLogin(accountID, targetURL string) (string, error) {
 	}
 
 	if strings.Contains(accountID, "@") {
-		accountID = AccountIDForEmail(accountID)
+		safe := SafeProfileNameForEmail(accountID)
+		if dir, err := m.profileDir(safe); err == nil {
+			if _, statErr := os.Stat(dir); statErr == nil {
+				accountID = safe
+			} else {
+				accountID = AccountIDForEmail(accountID)
+			}
+		} else {
+			accountID = AccountIDForEmail(accountID)
+		}
 	}
 	if accountID == "" {
 		accountID = fmt.Sprintf("Account-%05d", time.Now().Unix()%100000)
@@ -205,6 +224,7 @@ func (m *Manager) StartAutoLogin(accountID, targetURL string) (string, error) {
 		"--no-sandbox",
 		"--disable-gpu",
 		"--disable-dev-shm-usage",
+		"--disable-blink-features=AutomationControlled",
 		targetURL,
 	)
 
@@ -246,6 +266,7 @@ func (m *Manager) OpenProfile(accountID, targetURL string) error {
 		"--user-data-dir="+profileDir,
 		"--no-first-run",
 		"--no-default-browser-check",
+		"--disable-blink-features=AutomationControlled",
 		targetURL,
 	)
 	return cmd.Start()

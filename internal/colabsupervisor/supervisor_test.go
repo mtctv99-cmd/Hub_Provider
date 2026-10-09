@@ -89,4 +89,58 @@ func TestColabSupervisorLifecycle(t *testing.T) {
 			}
 		}
 	}
+
+	// 4. Test _at_ format filename
+	f3 := filepath.Join(tmpDir, "token_user3_at_gmail_com.json")
+	_ = os.WriteFile(f3, []byte(`{"token":"dummy3"}`), 0o600)
+	accs, _ = sup.DiscoverAccounts(ctx)
+	foundUser3 := false
+	for _, a := range accs {
+		if a.ID == "colab-user3_at_gmail_com" {
+			foundUser3 = true
+			if a.Email != "user3@gmail.com" {
+				t.Errorf("expected email user3@gmail.com, got %s", a.Email)
+			}
+		}
+	}
+	if !foundUser3 {
+		t.Fatal("user3 not discovered")
+	}
+
+	// 5. Test RecordActive
+	err = sup.RecordActive(ctx, "colab-user3_at_gmail_com")
+	if err != nil {
+		t.Fatalf("record active failed: %v", err)
+	}
+	accs, _ = sup.DiscoverAccounts(ctx)
+	for _, a := range accs {
+		if a.ID == "colab-user3_at_gmail_com" {
+			if a.Status != "ACTIVE" || a.ActiveSince == nil {
+				t.Errorf("expected user3 ACTIVE with ActiveSince, got status=%s, since=%v", a.Status, a.ActiveSince)
+			}
+		}
+	}
+
+	// 6. Test Rotate: user3 is ACTIVE, account2 is READY.
+	// Rotate should retire user3 into COOLDOWN and activate account2.
+	mockScript := filepath.Join(tmpDir, "mock_runner.py")
+	_ = os.WriteFile(mockScript, []byte("import sys\nsys.exit(0)\n"), 0o755)
+	sup.cfg.Command = "python " + mockScript
+	err = sup.Rotate(ctx)
+	if err != nil {
+		t.Fatalf("rotate failed: %v", err)
+	}
+	accs, _ = sup.DiscoverAccounts(ctx)
+	for _, a := range accs {
+		if a.ID == "colab-user3_at_gmail_com" {
+			if a.Status != "COOLDOWN" {
+				t.Errorf("expected user3 to be COOLDOWN after rotation, got %s", a.Status)
+			}
+		}
+		if a.ID == "colab-account2@gmail.com" {
+			if a.Status != "ACTIVE" {
+				t.Errorf("expected account2 to be ACTIVE after rotation, got %s", a.Status)
+			}
+		}
+	}
 }

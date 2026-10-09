@@ -22,9 +22,37 @@ print("Checking llama-cpp-python version...")
 try:
     import llama_cpp
     print(f"Existing llama_cpp version: {llama_cpp.__version__}")
-except ImportError:
-    print("llama_cpp not installed, will upgrade/install...")
+except Exception as e:
+    # ImportError AND the common RuntimeError from a wheel whose libllama.so
+    # cannot find libcudart.so.12 on a fresh VM — both mean reinstall.
+    print(f"llama_cpp unusable ({e}), will reinstall with CUDA runtime...")
     llama_cpp = None
+
+# The cu122 wheel links against libcudart.so.12, which is NOT on the base VM
+# (PyTorch bundles its own copy inside site-packages). Install the CUDA 12
+# runtime so ctypes can load libllama.so.
+try:
+    import ctypes
+    ctypes.CDLL("libcudart.so.12")
+    print("libcudart.so.12 already available.")
+except OSError:
+    print("Installing CUDA 12 runtime for llama.cpp wheel...")
+    subprocess.check_call([
+        sys.executable, "-m", "pip", "install", "-q",
+        "nvidia-cuda-runtime-cu12>=12.2,<13",
+        "nvidia-cublas-cu12>=12.2,<13",
+    ])
+    # Make the pip-installed libs visible to dlopen: preload the exact paths.
+    import glob, ctypes as _ct
+    site = subprocess.check_output([
+        sys.executable, "-c",
+        "import nvidia, os; print(os.path.dirname(nvidia.__file__))"
+    ], text=True).strip()
+    for so in glob.glob(f"{site}/*/lib/libcudart.so*") + glob.glob(f"{site}/*/lib/libcublas*.so*"):
+        try:
+            _ct.CDLL(so, mode=_ct.RTLD_GLOBAL)
+        except OSError as e:
+            print(f"preload skip {so}: {e}")
 
 subprocess.check_call([
     sys.executable, "-m", "pip", "install", "-q", "--upgrade",
@@ -58,9 +86,11 @@ parser = argparse.ArgumentParser(description="Colab LLM Remote Worker")
 parser.add_argument("--server-url", default="https://hub.maika.sbs")
 parser.add_argument("--worker-id", default="colab-default")
 parser.add_argument("--api-key", default="omni-secret-key-123")
-parser.add_argument("--repo-id", default="unsloth/Qwen3-VL-4B-Instruct-GGUF")
-parser.add_argument("--filename", default="Qwen3-VL-4B-Instruct-Q4_K_M.gguf")
+parser.add_argument("--repo-id", default="unsloth/Qwen3.5-2B-GGUF")
+parser.add_argument("--filename", default="Qwen3.5-2B-Q8_0.gguf")
 parser.add_argument("--mmproj", default="mmproj-F16.gguf")
+parser.add_argument("--model-name", default="qwen3.5-2b", help="Primary model id registered to the hub")
+parser.add_argument("--alias", action="append", default=[], help="Extra model alias (repeatable)")
 parser.add_argument("--n-ctx", type=int, default=32768)
 parser.add_argument("--flash-attn", action="store_true", default=True)
 args, _ = parser.parse_known_args()
@@ -72,6 +102,8 @@ REPO_ID = args.repo_id
 FILENAME = args.filename
 MMPROJ = args.mmproj
 N_CTX = args.n_ctx
+MODEL_NAME = args.model_name
+EXTRA_ALIASES = args.alias
 
 _model = None
 
@@ -122,12 +154,31 @@ def load_model() -> Llama:
 
         if os.path.exists(mmproj_path):
             try:
-                try:
-                    from llama_cpp.llama_chat_format import Qwen25VLChatHandler as VisionHandler
-                    print("Using Qwen2.5/3-VL chat handler")
-                except ImportError:
+                if "qwen" in FILENAME.lower() or "qwen" in REPO_ID.lower():
+                    try:
+                        from llama_cpp.llama_chat_format import Qwen25VLChatHandler as VisionHandler
+                        print("Using Qwen2.5/3-VL chat handler")
+                    except ImportError:
+                        from llama_cpp.llama_chat_format import Llava15ChatHandler as VisionHandler
+                        print("Qwen handler not available, falling back to Llava15ChatHandler")
+                elif "gemma" in FILENAME.lower() or "gemma" in REPO_ID.lower():
+                    # Gemma vision projector needs its own handler; the Qwen
+                    # handler leaks <|im_start|> into answers and no handler
+                    # at all drops images entirely.
+                    VisionHandler = None
+                    try:
+                        from llama_cpp.llama_chat_format import Gemma4ChatHandler as VisionHandler
+                        print("Using Gemma4 chat handler")
+                    except ImportError:
+                        try:
+                            from llama_cpp.llama_chat_format import Gemma3ChatHandler as VisionHandler
+                            print("Using Gemma3 chat handler")
+                        except ImportError:
+                            from llama_cpp.llama_chat_format import MTMDChatHandler as VisionHandler
+                            print("Gemma handler not available, falling back to generic MTMD handler")
+                else:
                     from llama_cpp.llama_chat_format import Llava15ChatHandler as VisionHandler
-                    print("Qwen handler not available, falling back to Llava15ChatHandler")
+                    print("Using generic Llava15 chat handler")
                 chat_handler = VisionHandler(clip_model_path=mmproj_path, verbose=False)
                 print("Vision mmproj handler loaded successfully.")
             except Exception as e:
@@ -192,8 +243,15 @@ async def run_worker():
     # Preload model before opening socket
     model = await asyncio.to_thread(load_model)
 
-    ws_scheme = "wss" if SERVER_URL.startswith("https") else "ws"
+    ws_scheme = "wss" if SERVER_URL.startswith("https") or SERVER_URL.startswith("wss") else "ws"
     base_netloc = SERVER_URL.split("://", 1)[-1].rstrip("/")
+    # Accept both a base URL (https://hub.maika.sbs) and a full worker URL
+    # (ws://hub/api/llm/ws/worker) — COLAB_SERVER_URL passes the full path,
+    # which must not be appended twice or the hub answers 401.
+    for marker in ("/api/llm/ws/worker", "/api/llm/ws"):
+        if marker in base_netloc:
+            base_netloc = base_netloc.split(marker, 1)[0].rstrip("/")
+            break
     query = urlencode({"worker_id": WORKER_ID, "token": API_KEY})
     ws_url = f"{ws_scheme}://{base_netloc}/api/llm/ws/worker?{query}"
 
@@ -203,14 +261,16 @@ async def run_worker():
     while True:
         try:
             async with websockets.connect(ws_url, ping_interval=20, ping_timeout=20) as ws:
-                # Register with Qwen3-VL-4B and aliases
-                models_list = ["qwen3-vl-4b", "qwen3-vl", "Qwen3-VL-4B-Instruct-Q4_K_M", "qwen25-vl", "qwen2.5-vl", "gemma-4-colab", FILENAME.replace(".gguf", "")]
+                # Register the configured model and its aliases
+                models_list = [
+                    MODEL_NAME, FILENAME.replace(".gguf", ""), "vllm-default",
+                ] + list(EXTRA_ALIASES)
                 reg_payload = {
                     "type": "register",
                     "worker_id": WORKER_ID,
-                    "model": "qwen3-vl-4b",
+                    "model": MODEL_NAME,
                     "models": list(dict.fromkeys(models_list)),
-                    "capabilities": ["chat", "streaming", "vision"],
+                    "capabilities": ["chat", "streaming", "vision", "reasoning"],
                     "max_concurrency": 4,
                 }
                 await ws.send(json.dumps(reg_payload))
