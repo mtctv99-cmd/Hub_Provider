@@ -108,6 +108,26 @@ def get_client(token_file):
     return Client(Prod, session=sess)
 
 
+# Minimal models.yaml materialized on the Colab VM for combined_worker --config.
+# combined_worker requires a config file; the notebook has no repo checkout.
+COMBINED_CONFIG_YAML = """models:
+  gemma-4-colab:
+    provider: google_colab
+    capabilities: [chat, streaming, vision, reasoning]
+    timeout_sec: 180
+  piper:ngochuyennew:
+    provider: piper_local
+    capabilities: [audio_speech]
+  piper:th_TH-mms_female-medium:
+    provider: piper_local
+    capabilities: [audio_speech]
+  piper:khmer_tts_v3:
+    provider: piper_local
+    capabilities: [audio_speech]
+"""
+COMBINED_CONFIG_PATH = '/content/combined_models.yaml'
+
+
 def do_start(account_id, token_dir, server_url, worker_token, worker_type='combined',
              context_size=DEFAULT_CONTEXT_SIZE, llm_concurrency=DEFAULT_LLM_CONCURRENCY,
              repo_id=None, filename=None, mmproj=None, model_name=None, aliases=None):
@@ -166,12 +186,14 @@ def do_start(account_id, token_dir, server_url, worker_token, worker_type='combi
         script_code = f.read()
 
     hf_token = os.environ.get('HF_TOKEN', '')
+    preamble_config = ''
     if worker_type == 'combined':
         argv_repr = [
             'combined_worker',
             '--server', str(server_url),
             '--worker-id', str(worker_id),
             '--token', str(worker_token),
+            '--config', COMBINED_CONFIG_PATH,
             '--model-id', model_name or DEFAULT_LLM_NAME,
             '--repo-id', repo_id or DEFAULT_REPO_ID,
             '--filename', filename or DEFAULT_FILENAME,
@@ -180,8 +202,13 @@ def do_start(account_id, token_dir, server_url, worker_token, worker_type='combi
             '--flash-attn',
             '--tts-gpu',
         ]
-        if mmproj or DEFAULT_MMPROJ:
-            argv_repr += ['--mmproj', mmproj or DEFAULT_MMPROJ]
+        # NOTE: --mmproj intentionally omitted: LlamaChat skips vision when the
+        # file is absent, and the projector is optional for chat.
+        # Materialize the minimal models.yaml combined_worker --config requires.
+        preamble_config = (
+            "from pathlib import Path as _P\n"
+            f"_P({COMBINED_CONFIG_PATH!r}).write_text({COMBINED_CONFIG_YAML!r}, encoding='utf-8')\n"
+        )
     elif worker_type == 'vllm':
         argv_repr = [
             'vllm_worker',
@@ -223,6 +250,7 @@ _pip('websocket-client')
 _pip('huggingface_hub')
 _pip('hf_transfer')
 _pip('numpy')
+_pip('pyyaml')
 _pip('onnxruntime')
 _pip('piper-tts')
 if importlib.util.find_spec('llama_cpp') is None:
@@ -252,7 +280,7 @@ if HF_TOKEN:
     os.environ["HF_TOKEN"] = HF_TOKEN
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 sys.argv = {argv_repr!r}
-# ============================================
+{preamble_config}# ============================================
 """ + bootstrap + script_code
 
     stop_event = threading.Event()

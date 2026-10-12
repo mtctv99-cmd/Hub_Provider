@@ -370,7 +370,7 @@ func (s *Supervisor) Start(ctx context.Context) {
 }
 
 func (s *Supervisor) check(ctx context.Context) {
-	if !s.CanExecute() {
+	if ctx.Err() != nil || !s.CanExecute() {
 		return
 	}
 	iterCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
