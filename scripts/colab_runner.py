@@ -334,7 +334,9 @@ sys.argv = {argv_repr!r}
                     text = out.get('text', '').strip()
                     if text:
                         LOG.info('[%s] Colab: %s', email, text[:200])
-                        if 'Connected' in text or 'Registered' in text or 'Model loaded' in text:
+                        lowered = text.lower()
+                        if ('registered' in lowered or 'connected' in lowered
+                                or 'model loaded' in lowered):
                             ready_event.set()
                 elif out.get('output_type') == 'error':
                     tb = ''.join(out.get('traceback', []))
