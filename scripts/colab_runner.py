@@ -270,7 +270,33 @@ for _sp in _site.getsitepackages() + [_site.getusersitepackages()]:
         _old = _os.environ.get('LD_LIBRARY_PATH', '')
         _os.environ['LD_LIBRARY_PATH'] = _nv + ((':' + _old) if _old else '')
         print('Added to LD_LIBRARY_PATH: ' + _nv, flush=True)
+        try:
+            print('cuda_runtime lib contents: ' + str(sorted(_os.listdir(_nv))[:10]), flush=True)
+        except Exception as _e:
+            print('Cannot list cuda_runtime lib: ' + str(_e)[:120], flush=True)
         break
+# Belt and suspenders: dlopen resolution via LD_LIBRARY_PATH is fragile
+# inside long-lived kernels, so preload libcudart by explicit path. Without
+# this, libllama.so fails with "libcudart.so.12: cannot open shared object".
+import ctypes as _ct
+import glob as _glob
+_preloaded = False
+for _pat in (
+    '/usr/local/lib/python*/dist-packages/nvidia/cuda_runtime/lib/libcudart.so*',
+    '/usr/lib/python*/dist-packages/nvidia/cuda_runtime/lib/libcudart.so*',
+):
+    for _p in sorted(_glob.glob(_pat)):
+        try:
+            _ct.CDLL(_p)
+            print('Preloaded ' + _p, flush=True)
+            _preloaded = True
+            break
+        except Exception as _e:
+            print('Preload failed ' + _p + ': ' + str(_e)[:160], flush=True)
+    if _preloaded:
+        break
+if not _preloaded:
+    print('WARNING: no libcudart preloaded; libllama load may fail', flush=True)
 print('combined bootstrap done.', flush=True)
 """
     elif worker_type == 'vllm':
