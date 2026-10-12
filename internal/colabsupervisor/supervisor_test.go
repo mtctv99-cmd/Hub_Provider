@@ -99,15 +99,29 @@ func TestColabSupervisorBusyGuard(t *testing.T) {
 	blockScript := filepath.Join(tmpDir, "block_runner.py")
 	_ = os.WriteFile(blockScript, []byte("import time\ntime.sleep(5)\n"), 0o755)
 	sup := New(db, Config{TokenDir: tmpDir, Command: "python " + blockScript, Cooldown: time.Hour})
+	sup.cfg.StartGrace = 300 * time.Millisecond
 
 	ctx := context.Background()
 	done := make(chan error, 1)
 	go func() { done <- sup.Rotate(ctx) }()
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	if err := sup.Rotate(ctx); err == nil || err.Error() != "colab rotation already in progress" {
 		t.Fatalf("expected busy-guard error, got %v", err)
 	}
-	<-done
+	if err := <-done; err != nil {
+		t.Fatalf("first rotate should go ACTIVE after grace, got %v", err)
+	}
+	// Grace expiry marks the still-running worker ACTIVE.
+	accs, _ := sup.DiscoverAccounts(ctx)
+	found := false
+	for _, a := range accs {
+		if a.ID == "colab-busy1_at_gmail_com" && a.Status == "ACTIVE" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected busy1 ACTIVE after grace expiry")
+	}
 }
 
 func TestParseCooldownTimeMixedEncodings(t *testing.T) {

@@ -32,6 +32,10 @@ type Config struct {
 	Prewarm        time.Duration
 	Cooldown       time.Duration
 	CommandTimeout time.Duration
+	// StartGrace bounds how long Rotate waits to distinguish fast failure
+	// from a healthy boot before marking the account ACTIVE. The worker
+	// process itself runs for hours; only the verdict is bounded.
+	StartGrace time.Duration
 }
 
 type Account struct {
@@ -68,6 +72,9 @@ func New(db *sql.DB, cfg Config) *Supervisor {
 	}
 	if cfg.Cooldown <= 0 {
 		cfg.Cooldown = DefaultCooldown
+	}
+	if cfg.StartGrace <= 0 {
+		cfg.StartGrace = 90 * time.Second
 	}
 	return &Supervisor{db: db, cfg: cfg}
 }
@@ -310,17 +317,12 @@ func (s *Supervisor) Rotate(ctx context.Context) error {
 		}
 	}
 
-	// 2. Start eligible account
-	if err := s.runCommand(ctx, "start", eligible.ID); err != nil {
-		// Long penalty: a failed assign usually means account GPU quota is
-		// exhausted; hammering it every few minutes makes recovery slower
-		// and burns quota on sibling accounts instead of cycling through.
-		_ = s.RecordCooldown(ctx, eligible.ID, 30*time.Minute)
+	// 2. Start eligible account (async: the worker process outlives Rotate).
+	if err := s.trackStart(ctx, eligible.ID); err != nil {
 		return err
 	}
 
-	// 3. Mark newly allocated account as ACTIVE
-	return s.RecordActive(ctx, eligible.ID)
+	return nil
 }
 
 func (s *Supervisor) StartAccount(ctx context.Context, accountID string) error {
@@ -336,10 +338,7 @@ func (s *Supervisor) StartAccount(ctx context.Context, accountID string) error {
 	defer s.end()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.runCommand(ctx, "start", accountID); err != nil {
-		return err
-	}
-	return s.RecordActive(ctx, accountID)
+	return s.trackStart(ctx, accountID)
 }
 
 func (s *Supervisor) StopAccount(ctx context.Context, accountID string) error {
@@ -361,8 +360,42 @@ func (s *Supervisor) StopAccount(ctx context.Context, accountID string) error {
 	return s.RecordCooldown(ctx, accountID, s.cfg.Cooldown)
 }
 
-func (s *Supervisor) runCommand(ctx context.Context, action, accountID string) error {
-	parts := strings.Fields(s.cfg.Command)
+// trackStart launches the blocking worker start in background and returns a
+// fast verdict: fast failure (bad token, no GPU quota) is reported as an
+// error with a cooldown, while a still-running worker past StartGrace is
+// optimistically marked ACTIVE. A late exit is downgraded to cooldown so a
+// dead worker does not squat the ACTIVE slot until MaxRuntime.
+func (s *Supervisor) trackStart(ctx context.Context, accountID string) error {
+	type result struct{ err error }
+	done := make(chan result, 1)
+	go func() {
+		err := s.runCommand(ctx, "start", accountID)
+		select {
+		case done <- result{err}:
+		default:
+		}
+		if err != nil && ctx.Err() == nil {
+			log.Printf("[COLAB_SUPERVISOR] worker %s exited: %v", accountID, err)
+			_ = s.RecordCooldown(context.Background(), accountID, 30*time.Minute)
+		}
+	}()
+	timer := time.NewTimer(s.cfg.StartGrace)
+	defer timer.Stop()
+	select {
+	case r := <-done:
+		if r.err != nil {
+			_ = s.RecordCooldown(ctx, accountID, 30*time.Minute)
+			return r.err
+		}
+		return s.RecordActive(ctx, accountID)
+	case <-timer.C:
+		return s.RecordActive(ctx, accountID)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *Supervisor) runCommand(ctx context.Context, action, accountID string) error {	parts := strings.Fields(s.cfg.Command)
 	if len(parts) == 0 {
 		return ErrNotConfigured
 	}
