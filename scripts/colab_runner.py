@@ -260,43 +260,43 @@ if importlib.util.find_spec('llama_cpp') is None:
 # expose on the loader path (a preinstalled nvidia.cuda_runtime may exist yet
 # still not resolve). Always (re)install and prepend its lib dir so ctypes
 # dlopen finds libcudart at import time.
-print('Ensuring nvidia-cuda-runtime-cu12...', flush=True)
-subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', '-U', 'nvidia-cuda-runtime-cu12'])
+# CUDA wheel links against libcudart/cublas .so.12, which stock Colab images
+# do not expose on the loader path (a preinstalled nvidia.cuda_runtime may
+# exist yet still not resolve). Always (re)install the runtime libs, prepend
+# every nvidia lib dir, and preload the .so files by absolute path.
+print('Ensuring nvidia CUDA runtime libs...', flush=True)
+subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', '-U',
+                       'nvidia-cuda-runtime-cu12', 'nvidia-cublas-cu12'])
 import os as _os
 import site as _site
 for _sp in _site.getsitepackages() + [_site.getusersitepackages()]:
-    _nv = _os.path.join(_sp, 'nvidia', 'cuda_runtime', 'lib')
-    if _os.path.isdir(_nv):
-        _old = _os.environ.get('LD_LIBRARY_PATH', '')
-        _os.environ['LD_LIBRARY_PATH'] = _nv + ((':' + _old) if _old else '')
-        print('Added to LD_LIBRARY_PATH: ' + _nv, flush=True)
-        try:
-            print('cuda_runtime lib contents: ' + str(sorted(_os.listdir(_nv))[:10]), flush=True)
-        except Exception as _e:
-            print('Cannot list cuda_runtime lib: ' + str(_e)[:120], flush=True)
-        break
-# Belt and suspenders: dlopen resolution via LD_LIBRARY_PATH is fragile
-# inside long-lived kernels, so preload libcudart by explicit path. Without
-# this, libllama.so fails with "libcudart.so.12: cannot open shared object".
+    _nvroot = _os.path.join(_sp, 'nvidia')
+    if not _os.path.isdir(_nvroot):
+        continue
+    for _entry in sorted(_os.listdir(_nvroot)):
+        _libdir = _os.path.join(_nvroot, _entry, 'lib')
+        if _os.path.isdir(_libdir):
+            _old = _os.environ.get('LD_LIBRARY_PATH', '')
+            if _libdir not in _old.split(':'):
+                _os.environ['LD_LIBRARY_PATH'] = _libdir + ((':' + _old) if _old else '')
+                print('Added to LD_LIBRARY_PATH: ' + _libdir, flush=True)
 import ctypes as _ct
 import glob as _glob
-_preloaded = False
+_preloaded = []
 for _pat in (
-    '/usr/local/lib/python*/dist-packages/nvidia/cuda_runtime/lib/libcudart.so*',
-    '/usr/lib/python*/dist-packages/nvidia/cuda_runtime/lib/libcudart.so*',
+    '*/nvidia/cuda_runtime/lib/libcudart.so*',
+    '*/nvidia/cublas/lib/libcublas*.so*',
 ):
-    for _p in sorted(_glob.glob(_pat)):
-        try:
-            _ct.CDLL(_p)
-            print('Preloaded ' + _p, flush=True)
-            _preloaded = True
-            break
-        except Exception as _e:
-            print('Preload failed ' + _p + ': ' + str(_e)[:160], flush=True)
-    if _preloaded:
-        break
+    for _base in _site.getsitepackages() + [_site.getusersitepackages()]:
+        for _p in sorted(_glob.glob(_os.path.join(_base, _pat))):
+            try:
+                _ct.CDLL(_p)
+                _preloaded.append(_p)
+                print('Preloaded ' + _p, flush=True)
+            except Exception as _e:
+                print('Preload failed ' + _p + ': ' + str(_e)[:160], flush=True)
 if not _preloaded:
-    print('WARNING: no libcudart preloaded; libllama load may fail', flush=True)
+    print('WARNING: no CUDA libs preloaded; libllama load may fail', flush=True)
 print('combined bootstrap done.', flush=True)
 """
     elif worker_type == 'vllm':
