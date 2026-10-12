@@ -256,10 +256,21 @@ _pip('piper-tts')
 if importlib.util.find_spec('llama_cpp') is None:
     print('Installing llama-cpp-python (CUDA)...', flush=True)
     subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', 'llama-cpp-python', '--extra-index-url', 'https://abetlen.github.io/llama-cpp-python/whl/cu122'])
-# CUDA wheel links against libcudart.so.12, absent from stock Colab images.
-if importlib.util.find_spec('nvidia.cuda_runtime') is None:
-    print('Installing nvidia-cuda-runtime-cu12...', flush=True)
-    subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', 'nvidia-cuda-runtime-cu12'])
+# CUDA wheel links against libcudart.so.12, which stock Colab images do not
+# expose on the loader path (a preinstalled nvidia.cuda_runtime may exist yet
+# still not resolve). Always (re)install and prepend its lib dir so ctypes
+# dlopen finds libcudart at import time.
+print('Ensuring nvidia-cuda-runtime-cu12...', flush=True)
+subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', '-U', 'nvidia-cuda-runtime-cu12'])
+import os as _os
+import site as _site
+for _sp in _site.getsitepackages() + [_site.getusersitepackages()]:
+    _nv = _os.path.join(_sp, 'nvidia', 'cuda_runtime', 'lib')
+    if _os.path.isdir(_nv):
+        _old = _os.environ.get('LD_LIBRARY_PATH', '')
+        _os.environ['LD_LIBRARY_PATH'] = _nv + ((':' + _old) if _old else '')
+        print('Added to LD_LIBRARY_PATH: ' + _nv, flush=True)
+        break
 print('combined bootstrap done.', flush=True)
 """
     elif worker_type == 'vllm':
