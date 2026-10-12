@@ -18,9 +18,22 @@ func setupTestDB(t *testing.T) *sql.DB {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		t.Fatalf("pragma: %v", err)
+	}
 	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS identities (
+			id TEXT PRIMARY KEY,
+			provider_group TEXT NOT NULL,
+			email TEXT UNIQUE NOT NULL,
+			normalized_email TEXT,
+			priority INTEGER DEFAULT 1,
+			global_status TEXT NOT NULL DEFAULT 'active',
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
 		CREATE TABLE IF NOT EXISTS account_cooldowns (
-			identity_id TEXT PRIMARY KEY,
+			identity_id TEXT PRIMARY KEY REFERENCES identities(id) ON DELETE CASCADE,
 			state TEXT NOT NULL DEFAULT 'READY',
 			cooldown_until DATETIME,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP

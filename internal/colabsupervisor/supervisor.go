@@ -184,11 +184,38 @@ func unixSecondsToTime(f float64) (time.Time, bool) {
 	return time.Unix(secs, int64((f - float64(secs)) * 1e9)), true
 }
 
+// ensureIdentity creates the parent identities row required by the
+// account_cooldowns foreign key. Colab accounts live outside the identity
+// manager, so without this every cooldown/ACTIVE write fails silently.
+func (s *Supervisor) ensureIdentity(ctx context.Context, accountID string) {
+	if s == nil || s.db == nil {
+		return
+	}
+	email := accountIDToEmail(accountID)
+	_, _ = s.db.ExecContext(ctx, `
+		INSERT OR IGNORE INTO identities(id, provider_group, email, normalized_email)
+		VALUES (?, 'colab', ?, ?)`,
+		accountID, email, strings.ToLower(email))
+}
+
+func accountIDToEmail(accountID string) string {
+	name := strings.TrimPrefix(accountID, "colab-")
+	if strings.Contains(name, "_at_") {
+		parts := strings.SplitN(name, "_at_", 2)
+		return parts[0] + "@" + strings.ReplaceAll(parts[1], "_", ".")
+	}
+	if strings.Contains(name, "@") {
+		return name
+	}
+	return name + "@unknown.local"
+}
+
 // RecordCooldown marks an account in cooldown for duration.
 func (s *Supervisor) RecordCooldown(ctx context.Context, accountID string, duration time.Duration) error {
 	if s == nil || s.db == nil {
 		return nil
 	}
+	s.ensureIdentity(ctx, accountID)
 	until := time.Now().Add(duration)
 	rawName := strings.TrimPrefix(accountID, "colab-")
 	_, err := s.db.ExecContext(ctx, `
@@ -217,6 +244,7 @@ func (s *Supervisor) RecordActive(ctx context.Context, accountID string) error {
 	if s == nil || s.db == nil {
 		return nil
 	}
+	s.ensureIdentity(ctx, accountID)
 	rawName := strings.TrimPrefix(accountID, "colab-")
 	_, err := s.db.ExecContext(ctx, `
 			INSERT INTO account_cooldowns(identity_id, state, cooldown_until, updated_at)
