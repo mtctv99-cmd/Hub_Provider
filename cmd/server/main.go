@@ -188,8 +188,9 @@ func main() {
 	colabSupervisor := colabsupervisor.New(database.DB, colabsupervisor.Config{
 		TokenDir: colabTokenDir,
 		Command:  os.Getenv("COLAB_SUPERVISOR_CMD"),
-		// Cold start (pip install + GGUF download + model load) takes 10-20 min.
-		CommandTimeout: 25 * time.Minute,
+		// Cold start (pip install + GGUF download + model load) takes 10-20 min,
+		// combined LLM+TTS worker up to ~30 min.
+		CommandTimeout: 35 * time.Minute,
 	})
 	handler.SetColabSupervisor(colabSupervisor)
 	browserMgr := browser.NewManager("data/profiles", func(accountID, email, cookieStr, profileDir string) error {

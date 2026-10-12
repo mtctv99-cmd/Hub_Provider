@@ -300,12 +300,14 @@ sys.argv = {argv_repr!r}
     ka_thread.start()
 
     LOG.info('[%s] Waiting for Colab worker to register with Server...', email)
-    # vllm bootstrap install + model load can take 10-20 minutes on fresh T4 VM.
-    ready_event.wait(timeout=1200.0)
+    # Cold boot takes long: vllm pip install + model load 10-20 min,
+    # combined (llama-cpp CUDA + GGUF + 3 TTS voices) up to ~30 min.
+    ready_timeout = 1800.0 if worker_type == 'combined' else 1200.0
+    ready_event.wait(timeout=ready_timeout)
     if ready_event.is_set():
         LOG.info('Colab worker %s online and registered successfully.', worker_id)
     else:
-        LOG.warning('Worker %s did not signal ready within 20 minutes.', worker_id)
+        LOG.warning('Worker %s did not signal ready within %d minutes.', worker_id, int(ready_timeout // 60))
         # ponytail: release GPU on failed start, else quota leaks until manual stop.
         try:
             client.unassign(endpoint)
