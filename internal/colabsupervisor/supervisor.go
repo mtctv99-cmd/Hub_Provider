@@ -312,7 +312,10 @@ func (s *Supervisor) Rotate(ctx context.Context) error {
 
 	// 2. Start eligible account
 	if err := s.runCommand(ctx, "start", eligible.ID); err != nil {
-		_ = s.RecordCooldown(ctx, eligible.ID, 3*time.Minute)
+		// Long penalty: a failed assign usually means account GPU quota is
+		// exhausted; hammering it every few minutes makes recovery slower
+		// and burns quota on sibling accounts instead of cycling through.
+		_ = s.RecordCooldown(ctx, eligible.ID, 30*time.Minute)
 		return err
 	}
 

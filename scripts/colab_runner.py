@@ -11,10 +11,12 @@ Actions:
   stop   - Terminates and unassigns active Colab session for the account
   rotate - Gracefully stops the current account and starts next eligible account
 
-Worker types (--worker-type, default: combined):
+Worker types (--worker-type, default: llama):
+  llama    - colab/remote_worker.py: LLM text-only (llama.cpp). Proven fast
+             boot (~5 min) on T4; current default until the combined-worker's
+             32k-context load stall is root-caused.
   combined - colab/combined_worker.py: 1 LLM (llama.cpp) + 3 TTS voices,
-             2 WS lanes. Last-known-good on T4.
-  llama    - colab/remote_worker.py: LLM text-only (llama.cpp).
+             2 WS lanes. Needs COLAB_WORKER_TYPE=combined.
   vllm     - colab/vllm_worker.py: high-throughput chat, needs big VRAM.
 """
 import argparse
@@ -425,7 +427,7 @@ def main():
     parser.add_argument('--token-dir', default=os.environ.get('COLAB_TOKEN_DIR') or str(Path.home() / '.config' / 'colab-cli'))
     parser.add_argument('--server', default=os.environ.get('COLAB_SERVER_URL') or os.environ.get('PIPER_SERVER_URL') or 'ws://127.0.0.1:18080/api/llm/ws/worker')
     parser.add_argument('--token', default=os.environ.get('WORKER_TOKEN') or os.environ.get('WORKER_AUTH_TOKEN') or '', help='Worker auth token (required, no insecure default)')
-    parser.add_argument('--worker-type', default=os.environ.get('COLAB_WORKER_TYPE', 'combined'), choices=['combined', 'vllm', 'llama'])
+    parser.add_argument('--worker-type', default=os.environ.get('COLAB_WORKER_TYPE', 'llama'), choices=['combined', 'vllm', 'llama'])
     parser.add_argument('--context-size', type=int, default=DEFAULT_CONTEXT_SIZE)
     parser.add_argument('--llm-concurrency', type=int, default=DEFAULT_LLM_CONCURRENCY)
     parser.add_argument('--repo-id', default=None, help='GGUF repo (llama worker)')
