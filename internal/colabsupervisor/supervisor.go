@@ -192,6 +192,13 @@ func (s *Supervisor) ensureIdentity(ctx context.Context, accountID string) {
 		return
 	}
 	email := accountIDToEmail(accountID)
+	// Email may already belong to a non-colab identity (UNIQUE): INSERT OR
+	// IGNORE would silently skip and leave the FK parent missing, so detect
+	// the collision and fall back to a synthetic address.
+	var owner string
+	if err := s.db.QueryRowContext(ctx, `SELECT id FROM identities WHERE email=?`, email).Scan(&owner); err == nil && owner != "" && owner != accountID {
+		email = accountID + "@colab.local"
+	}
 	_, _ = s.db.ExecContext(ctx, `
 		INSERT OR IGNORE INTO identities(id, provider_group, email, normalized_email)
 		VALUES (?, 'colab', ?, ?)`,
