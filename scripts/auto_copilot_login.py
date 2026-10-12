@@ -1,3 +1,7 @@
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 import json, os, sqlite3, sys, time, uuid
 from pathlib import Path
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -16,6 +20,53 @@ DB_PATH = "/media/reup/Data_sv4/Sever_provider/data/orchestrator.db"
 MASTER_KEY = bytes.fromhex("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 PROFILES_BASE = Path("/media/reup/Data_sv4/Sever_provider/data/profiles/copilot")
 PROFILES_BASE.mkdir(parents=True, exist_ok=True)
+LOCK_FILE = PROFILES_BASE / ".refresh.lock"
+
+
+def acquire_lock():
+    """Chong chay chong cheo cron + systemd timer. Tra ve fd giu lock, hoac None neu dang co tien trinh khac chay."""
+    if fcntl is None:
+        return True
+    try:
+        fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_RDWR, 0o644)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        os.ftruncate(fd, 0)
+        os.write(fd, str(os.getpid()).encode())
+        return fd
+    except (OSError, IOError) as e:
+        print(f"[!] Bo qua chay moi: da co tien trinh refresh khac ({e})")
+        return None
+
+
+def release_lock(fd):
+    if fcntl is None or fd is True or fd is None:
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    except Exception:
+        pass
+
+
+def clear_stale_singleton_lock(profile_dir: Path) -> bool:
+    """Xoa SingletonLock ket neu khong con chrome nao dung profile. Tra True neu duoc phep chay tiep."""
+    import subprocess
+    try:
+        out = subprocess.run(["pgrep", "-af", str(profile_dir)], capture_output=True, text=True, timeout=5)
+        if out.stdout.strip():
+            print(f"[!] Profile {profile_dir} dang duoc tien trinh khac giu, bo qua account nay.")
+            return False
+    except Exception:
+        pass
+    for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+        try:
+            p = profile_dir / name
+            if p.exists() or p.is_symlink():
+                p.unlink()
+                print(f"[*] Da xoa stale lock: {p}")
+        except Exception as e:
+            print(f"[!] Khong xoa duoc {name}: {e}")
+    return True
 
 def profile_source_ref(email: str) -> str:
     safe_name = email.split("@")[0]
@@ -117,22 +168,30 @@ def login_account(email: str, password: str) -> bool:
     print(f"[*] Profile Dir: {profile_dir}")
     
     captured_ws = []
-    
+
+    if not clear_stale_singleton_lock(profile_dir):
+        return False
+
+    browser = None
     with sync_playwright() as p:
-        browser = p.chromium.launch_persistent_context(
-            str(profile_dir),
-            executable_path="/usr/bin/google-chrome",
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--disable-blink-features=AutomationControlled",
-                "--window-size=1280,800"
-            ]
-        )
+        try:
+            browser = p.chromium.launch_persistent_context(
+                str(profile_dir),
+                executable_path="/usr/bin/google-chrome",
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-blink-features=AutomationControlled",
+                    "--window-size=1280,800"
+                ]
+            )
+        except Exception as exc:
+            print(f"[-] Khong mo duoc browser cho {email}: {exc}")
+            return False
         page = browser.pages[0] if browser.pages else browser.new_page()
-        
+
         def on_ws(ws):
             u = ws.url
             if "Chathub" in u and "access_token" in u:
@@ -196,8 +255,12 @@ def login_account(email: str, password: str) -> bool:
         except Exception as exc:
             print(f"[-] Error during login: {exc}")
         finally:
-            browser.close()
-            
+            try:
+                if browser is not None:
+                    browser.close()
+            except Exception:
+                pass
+
     if captured_ws:
         save_to_db(email, captured_ws[0])
         return True
@@ -206,34 +269,44 @@ def login_account(email: str, password: str) -> bool:
         return False
 
 def main():
-    proactive = "--proactive" in sys.argv
-    lead_min = int(os.environ.get("REFRESH_LEAD_MIN", "60"))
-    lead_sec = lead_min * 60
-    targets = list(ACCOUNTS)
-    if proactive:
-        print(f"[*] Proactive mode: chỉ refresh token hết hạn trong {lead_min} phút tới")
-        skipped = []
-        kept = []
-        for email, _ in ACCOUNTS:
-            if needs_refresh(email, lead_sec):
-                kept.append(email)
-            else:
-                skipped.append(email)
-        for email in skipped:
-            print(f"[skip] token còn hạn > {lead_min}m: {email}")
-        targets = [(e, p) for e, p in ACCOUNTS if e in kept]
-        if not targets:
-            print("[*] Không có account nào cần refresh.")
-            return
-    results = {}
-    for email, pwd in targets:
-        ok = login_account(email, pwd)
-        results[email] = ok
-        time.sleep(2)
-        
-    print("\n================ FINAL REPORT ================")
-    for email, ok in results.items():
-        print(f"{email:40} : {'SUCCESS ✅' if ok else 'FAILED ❌'}")
+    lock_fd = acquire_lock()
+    if lock_fd is None:
+        return
+    try:
+        proactive = "--proactive" in sys.argv
+        lead_min = int(os.environ.get("REFRESH_LEAD_MIN", "60"))
+        lead_sec = lead_min * 60
+        targets = list(ACCOUNTS)
+        if proactive:
+            print(f"[*] Proactive mode: chỉ refresh token hết hạn trong {lead_min} phút tới")
+            skipped = []
+            kept = []
+            for email, _ in ACCOUNTS:
+                if needs_refresh(email, lead_sec):
+                    kept.append(email)
+                else:
+                    skipped.append(email)
+            for email in skipped:
+                print(f"[skip] token còn hạn > {lead_min}m: {email}")
+            targets = [(e, p) for e, p in ACCOUNTS if e in kept]
+            if not targets:
+                print("[*] Không có account nào cần refresh.")
+                return
+        results = {}
+        for email, pwd in targets:
+            try:
+                ok = login_account(email, pwd)
+            except Exception as exc:
+                print(f"[-] Account {email} loi khong mong doi: {exc}")
+                ok = False
+            results[email] = ok
+            time.sleep(2)
+
+        print("\n================ FINAL REPORT ================")
+        for email, ok in results.items():
+            print(f"{email:40} : {'SUCCESS ✅' if ok else 'FAILED ❌'}")
+    finally:
+        release_lock(lock_fd)
 
 if __name__ == "__main__":
     main()
