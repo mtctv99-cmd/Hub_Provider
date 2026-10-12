@@ -256,6 +256,10 @@ _pip('piper-tts')
 if importlib.util.find_spec('llama_cpp') is None:
     print('Installing llama-cpp-python (CUDA)...', flush=True)
     subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', 'llama-cpp-python', '--extra-index-url', 'https://abetlen.github.io/llama-cpp-python/whl/cu122'])
+# CUDA wheel links against libcudart.so.12, absent from stock Colab images.
+if importlib.util.find_spec('nvidia.cuda_runtime') is None:
+    print('Installing nvidia-cuda-runtime-cu12...', flush=True)
+    subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', 'nvidia-cuda-runtime-cu12'])
 print('combined bootstrap done.', flush=True)
 """
     elif worker_type == 'vllm':
