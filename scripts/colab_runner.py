@@ -284,8 +284,8 @@ import ctypes as _ct
 import glob as _glob
 _preloaded = []
 for _pat in (
-    '*/nvidia/cuda_runtime/lib/libcudart.so*',
-    '*/nvidia/cublas/lib/libcublas*.so*',
+    'nvidia/cuda_runtime/lib/libcudart.so*',
+    'nvidia/cublas/lib/libcublas*.so*',
 ):
     for _base in _site.getsitepackages() + [_site.getusersitepackages()]:
         for _p in sorted(_glob.glob(_os.path.join(_base, _pat))):
