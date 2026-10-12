@@ -32,6 +32,71 @@ func setupTestDB(t *testing.T) *sql.DB {
 	return db
 }
 
+func TestColabSupervisorBootstrap(t *testing.T) {
+	db := setupTestDB(t)
+	tmpDir, err := os.MkdirTemp("", "colab-bootstrap-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	_ = os.WriteFile(filepath.Join(tmpDir, "token_boot1_at_gmail_com.json"), []byte(`{"token":"x"}`), 0o600)
+	_ = os.WriteFile(filepath.Join(tmpDir, "token_boot2_at_gmail_com.json"), []byte(`{"token":"y"}`), 0o600)
+
+	mockScript := filepath.Join(tmpDir, "mock_runner.py")
+	_ = os.WriteFile(mockScript, []byte("import sys\nsys.exit(0)\n"), 0o755)
+	sup := New(db, Config{TokenDir: tmpDir, Command: "python " + mockScript, Cooldown: time.Hour})
+
+	// No ACTIVE accounts: check() must bootstrap the first READY one.
+	ctx := context.Background()
+	sup.check(ctx)
+	accs, _ := sup.DiscoverAccounts(ctx)
+	active := 0
+	for _, a := range accs {
+		if a.Status == "ACTIVE" {
+			active++
+		}
+	}
+	if active != 1 {
+		t.Fatalf("expected bootstrap to activate exactly 1 account, got %d", active)
+	}
+
+	// All accounts in cooldown and none ACTIVE: bootstrap must not fail loudly.
+	for _, a := range accs {
+		_ = sup.RecordCooldown(ctx, a.ID, time.Hour)
+	}
+	sup.check(ctx) // must not panic or activate anything
+	accs, _ = sup.DiscoverAccounts(ctx)
+	for _, a := range accs {
+		if a.Status == "ACTIVE" {
+			t.Fatalf("no account should activate while all in cooldown, got %s", a.ID)
+		}
+	}
+}
+
+func TestColabSupervisorBusyGuard(t *testing.T) {
+	db := setupTestDB(t)
+	tmpDir, err := os.MkdirTemp("", "colab-busy-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	_ = os.WriteFile(filepath.Join(tmpDir, "token_busy1_at_gmail_com.json"), []byte(`{"token":"x"}`), 0o600)
+	blockScript := filepath.Join(tmpDir, "block_runner.py")
+	_ = os.WriteFile(blockScript, []byte("import time\ntime.sleep(5)\n"), 0o755)
+	sup := New(db, Config{TokenDir: tmpDir, Command: "python " + blockScript, Cooldown: time.Hour})
+
+	ctx := context.Background()
+	done := make(chan error, 1)
+	go func() { done <- sup.Rotate(ctx) }()
+	time.Sleep(300 * time.Millisecond)
+	if err := sup.Rotate(ctx); err == nil || err.Error() != "colab rotation already in progress" {
+		t.Fatalf("expected busy-guard error, got %v", err)
+	}
+	<-done
+}
+
 func TestColabSupervisorLifecycle(t *testing.T) {
 	db := setupTestDB(t)
 	tmpDir, err := os.MkdirTemp("", "colab-tokens-*")

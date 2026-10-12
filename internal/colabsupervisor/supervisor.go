@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -45,6 +46,17 @@ type Supervisor struct {
 	cfg Config
 	db  *sql.DB
 	mu  sync.Mutex
+	// busy guards long-running start/stop commands so ticker ticks and
+	// admin HTTP calls pile up instead of stacking colab rotations.
+	busy atomic.Bool
+}
+
+func (s *Supervisor) tryBegin() bool {
+	return s.busy.CompareAndSwap(false, true)
+}
+
+func (s *Supervisor) end() {
+	s.busy.Store(false)
 }
 
 func New(db *sql.DB, cfg Config) *Supervisor {
@@ -176,6 +188,10 @@ func (s *Supervisor) Rotate(ctx context.Context) error {
 	if !s.Configured() {
 		return ErrNotConfigured
 	}
+	if !s.tryBegin() {
+		return errors.New("colab rotation already in progress")
+	}
+	defer s.end()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -219,6 +235,10 @@ func (s *Supervisor) StartAccount(ctx context.Context, accountID string) error {
 	if strings.TrimSpace(accountID) == "" {
 		return errors.New("account id is required")
 	}
+	if !s.tryBegin() {
+		return errors.New("colab rotation already in progress")
+	}
+	defer s.end()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.runCommand(ctx, "start", accountID); err != nil {
@@ -234,6 +254,10 @@ func (s *Supervisor) StopAccount(ctx context.Context, accountID string) error {
 	if strings.TrimSpace(accountID) == "" {
 		return errors.New("account id is required")
 	}
+	if !s.tryBegin() {
+		return errors.New("colab rotation already in progress")
+	}
+	defer s.end()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.runCommand(ctx, "stop", accountID); err != nil {
@@ -266,12 +290,15 @@ func (s *Supervisor) runCommand(ctx context.Context, action, accountID string) e
 	return nil
 }
 
-// Start runs a maintenance loop to check account runtime and auto-rotate when MaxRuntime expires.
+// Start runs a maintenance loop: bootstrap the first worker when none is
+// ACTIVE, and auto-rotate when MaxRuntime expires.
 func (s *Supervisor) Start(ctx context.Context) {
 	if s == nil {
 		return
 	}
 	go func() {
+		// First check immediately so a fresh server does not wait a full tick.
+		s.check(ctx)
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
 		for {
@@ -279,27 +306,44 @@ func (s *Supervisor) Start(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if !s.CanExecute() {
-					continue
-				}
-				iterCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-				accounts, err := s.DiscoverAccounts(iterCtx)
-				if err != nil {
-					cancel()
-					continue
-				}
-				now := time.Now()
-				for _, acc := range accounts {
-					if acc.Status == "ACTIVE" && acc.ActiveSince != nil {
-						if now.Sub(*acc.ActiveSince) >= s.cfg.MaxRuntime {
-							log.Printf("[COLAB_SUPERVISOR] account %s reached max runtime (%v); rotating...", acc.ID, s.cfg.MaxRuntime)
-							_ = s.Rotate(iterCtx)
-							break
-						}
-					}
-				}
-				cancel()
+				s.check(ctx)
 			}
 		}
 	}()
+}
+
+func (s *Supervisor) check(ctx context.Context) {
+	if !s.CanExecute() {
+		return
+	}
+	iterCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	accounts, err := s.DiscoverAccounts(iterCtx)
+	if err != nil {
+		cancel()
+		return
+	}
+	cancel()
+	now := time.Now()
+	hasActive := false
+	hasReady := false
+	for _, acc := range accounts {
+		switch acc.Status {
+		case "ACTIVE":
+			hasActive = true
+			if acc.ActiveSince != nil && now.Sub(*acc.ActiveSince) >= s.cfg.MaxRuntime {
+				log.Printf("[COLAB_SUPERVISOR] account %s reached max runtime (%v); rotating...", acc.ID, s.cfg.MaxRuntime)
+				_ = s.Rotate(ctx)
+				return
+			}
+		case "READY":
+			hasReady = true
+		}
+	}
+	// Bootstrap: no worker alive and at least one account out of cooldown.
+	if !hasActive && hasReady {
+		log.Printf("[COLAB_SUPERVISOR] no active worker; bootstrapping first colab worker...")
+		if err := s.Rotate(ctx); err != nil {
+			log.Printf("[COLAB_SUPERVISOR] bootstrap failed: %v", err)
+		}
+	}
 }

@@ -6,9 +6,16 @@ COLAB_SUPERVISOR_CMD is configured:
   python scripts/colab_runner.py <action> <account_id>
 
 Actions:
-  start  - Allocates a T4 GPU notebook, injects worker code (vLLM or llama.cpp), and starts worker
+  start  - Allocates a T4 GPU notebook, injects worker code (combined, vLLM or
+           llama.cpp), and starts worker
   stop   - Terminates and unassigns active Colab session for the account
   rotate - Gracefully stops the current account and starts next eligible account
+
+Worker types (--worker-type, default: combined):
+  combined - colab/combined_worker.py: 1 LLM (llama.cpp) + 3 TTS voices,
+             2 WS lanes. Last-known-good on T4.
+  llama    - colab/remote_worker.py: LLM text-only (llama.cpp).
+  vllm     - colab/vllm_worker.py: high-throughput chat, needs big VRAM.
 """
 import argparse
 import base64
@@ -27,12 +34,14 @@ LOG = logging.getLogger('colab_runner')
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REMOTE_WORKER_SCRIPT = REPO_ROOT / 'colab' / 'remote_worker.py'
 VLLM_WORKER_SCRIPT = REPO_ROOT / 'colab' / 'vllm_worker.py'
+COMBINED_WORKER_SCRIPT = REPO_ROOT / 'colab' / 'combined_worker.py'
 
-DEFAULT_MODEL = os.environ.get('COLAB_MODEL', 'google/gemma-4-E4B-it')
-DEFAULT_REPO_ID = 'unsloth/gemma-4-E4B-it-GGUF'
-DEFAULT_FILENAME = 'gemma-4-E4B-it-Q4_K_M.gguf'
-DEFAULT_MMPROJ = 'mmproj-F16.gguf'
-DEFAULT_LLM_NAME = 'gemma4-e4b'
+# Last-known-good on T4 (Sep 2026): gemma-4 E2B heretic Q4_K_M via llama.cpp.
+DEFAULT_MODEL = os.environ.get('COLAB_MODEL', 'gemma-4-colab')
+DEFAULT_REPO_ID = 'llmfan46/gemma-4-E2B-it-ultra-uncensored-heretic-GGUF'
+DEFAULT_FILENAME = 'gemma-4-E2B-it-ultra-uncensored-heretic-Q4_K_M.gguf'
+DEFAULT_MMPROJ = 'gemma-4-E2B-it-mmproj-BF16.gguf'
+DEFAULT_LLM_NAME = 'gemma-4-colab'
 DEFAULT_CONTEXT_SIZE = 32768
 DEFAULT_LLM_CONCURRENCY = 8
 
@@ -99,12 +108,15 @@ def get_client(token_file):
     return Client(Prod, session=sess)
 
 
-def do_start(account_id, token_dir, server_url, worker_token, worker_type='vllm',
+def do_start(account_id, token_dir, server_url, worker_token, worker_type='combined',
              context_size=DEFAULT_CONTEXT_SIZE, llm_concurrency=DEFAULT_LLM_CONCURRENCY,
              repo_id=None, filename=None, mmproj=None, model_name=None, aliases=None):
     token_file = resolve_token_file(token_dir, account_id)
     if not token_file:
         LOG.error('Token file not found for account %s in %s', account_id, token_dir)
+        sys.exit(1)
+    if not worker_token:
+        LOG.error('Worker token is required: set WORKER_TOKEN/WORKER_AUTH_TOKEN or pass --token')
         sys.exit(1)
 
     email = get_account_email(account_id, token_file)
@@ -143,12 +155,34 @@ def do_start(account_id, token_dir, server_url, worker_token, worker_type='vllm'
     worker_id = f"colab-{uuid.uuid4().hex[:6]}"
 
     # Pick script to inject
-    target_script = VLLM_WORKER_SCRIPT if worker_type == 'vllm' and VLLM_WORKER_SCRIPT.is_file() else REMOTE_WORKER_SCRIPT
+    if worker_type == 'vllm' and VLLM_WORKER_SCRIPT.is_file():
+        target_script = VLLM_WORKER_SCRIPT
+    elif worker_type == 'llama' or not COMBINED_WORKER_SCRIPT.is_file():
+        target_script = REMOTE_WORKER_SCRIPT
+    else:
+        target_script = COMBINED_WORKER_SCRIPT
+        worker_type = 'combined'
     with open(target_script, 'r', encoding='utf-8') as f:
         script_code = f.read()
 
     hf_token = os.environ.get('HF_TOKEN', '')
-    if worker_type == 'vllm':
+    if worker_type == 'combined':
+        argv_repr = [
+            'combined_worker',
+            '--server', str(server_url),
+            '--worker-id', str(worker_id),
+            '--token', str(worker_token),
+            '--model-id', model_name or DEFAULT_LLM_NAME,
+            '--repo-id', repo_id or DEFAULT_REPO_ID,
+            '--filename', filename or DEFAULT_FILENAME,
+            '--context-size', str(context_size),
+            '--llm-concurrency', str(llm_concurrency),
+            '--flash-attn',
+            '--tts-gpu',
+        ]
+        if mmproj or DEFAULT_MMPROJ:
+            argv_repr += ['--mmproj', mmproj or DEFAULT_MMPROJ]
+    elif worker_type == 'vllm':
         argv_repr = [
             'vllm_worker',
             '--server', str(server_url),
@@ -175,7 +209,28 @@ def do_start(account_id, token_dir, server_url, worker_token, worker_type='vllm'
             argv_repr += ['--alias', str(alias)]
 
     bootstrap = ''
-    if worker_type == 'vllm':
+    if worker_type == 'combined':
+        # Fresh Colab T4 ships almost nothing; install before worker imports.
+        bootstrap = """
+import importlib.util, subprocess, sys
+def _pip(*pkgs):
+    missing = [p for p in pkgs if importlib.util.find_spec(p) is None]
+    if missing:
+        print('Installing ' + ' '.join(missing) + '...', flush=True)
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q'] + missing)
+_pip('websockets')
+_pip('websocket-client')
+_pip('huggingface_hub')
+_pip('hf_transfer')
+_pip('numpy')
+_pip('onnxruntime')
+_pip('piper-tts')
+if importlib.util.find_spec('llama_cpp') is None:
+    print('Installing llama-cpp-python (CUDA)...', flush=True)
+    subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', 'llama-cpp-python', '--extra-index-url', 'https://abetlen.github.io/llama-cpp-python/whl/cu122'])
+print('combined bootstrap done.', flush=True)
+"""
+    elif worker_type == 'vllm':
         # Colab runtime does not ship vllm; install before the worker imports it.
         bootstrap = """
 import importlib.util, subprocess, sys
@@ -296,8 +351,8 @@ def main():
     parser.add_argument('account_id')
     parser.add_argument('--token-dir', default=os.environ.get('COLAB_TOKEN_DIR') or str(Path.home() / '.config' / 'colab-cli'))
     parser.add_argument('--server', default=os.environ.get('COLAB_SERVER_URL') or os.environ.get('PIPER_SERVER_URL') or 'ws://127.0.0.1:18080/api/llm/ws/worker')
-    parser.add_argument('--token', default=os.environ.get('WORKER_TOKEN') or os.environ.get('WORKER_AUTH_TOKEN') or 'omni-secret-key-123')
-    parser.add_argument('--worker-type', default=os.environ.get('COLAB_WORKER_TYPE', 'vllm'), choices=['vllm', 'llama'])
+    parser.add_argument('--token', default=os.environ.get('WORKER_TOKEN') or os.environ.get('WORKER_AUTH_TOKEN') or '', help='Worker auth token (required, no insecure default)')
+    parser.add_argument('--worker-type', default=os.environ.get('COLAB_WORKER_TYPE', 'combined'), choices=['combined', 'vllm', 'llama'])
     parser.add_argument('--context-size', type=int, default=DEFAULT_CONTEXT_SIZE)
     parser.add_argument('--llm-concurrency', type=int, default=DEFAULT_LLM_CONCURRENCY)
     parser.add_argument('--repo-id', default=None, help='GGUF repo (llama worker)')

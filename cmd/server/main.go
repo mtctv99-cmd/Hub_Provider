@@ -185,7 +185,12 @@ func main() {
 	if colabTokenDir == "" {
 		colabTokenDir = os.Getenv("HOME") + "/.config/colab-cli"
 	}
-	colabSupervisor := colabsupervisor.New(database.DB, colabsupervisor.Config{TokenDir: colabTokenDir, Command: os.Getenv("COLAB_SUPERVISOR_CMD")})
+	colabSupervisor := colabsupervisor.New(database.DB, colabsupervisor.Config{
+		TokenDir: colabTokenDir,
+		Command:  os.Getenv("COLAB_SUPERVISOR_CMD"),
+		// Cold start (pip install + GGUF download + model load) takes 10-20 min.
+		CommandTimeout: 25 * time.Minute,
+	})
 	handler.SetColabSupervisor(colabSupervisor)
 	browserMgr := browser.NewManager("data/profiles", func(accountID, email, cookieStr, profileDir string) error {
 		validateCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
