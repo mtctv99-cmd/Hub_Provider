@@ -110,7 +110,12 @@ func (s *Supervisor) DiscoverAccounts(ctx context.Context) ([]Account, error) {
 		var state string
 		var updatedAt sql.NullTime
 		if s.db != nil {
-			_ = s.db.QueryRowContext(ctx, `SELECT state, cooldown_until, updated_at FROM account_cooldowns WHERE identity_id=? OR identity_id=? OR identity_id=? ORDER BY updated_at DESC LIMIT 1`, accountID, name, email).Scan(&state, &cooldown, &updatedAt)
+			var raw any
+			if err := s.db.QueryRowContext(ctx, `SELECT state, cooldown_until, updated_at FROM account_cooldowns WHERE identity_id=? OR identity_id=? OR identity_id=? ORDER BY updated_at DESC LIMIT 1`, accountID, name, email).Scan(&state, &raw, &updatedAt); err == nil {
+				if t, ok := parseCooldownTime(raw); ok {
+					cooldown.Time, cooldown.Valid = t, true
+				}
+			}
 		}
 		acc := Account{ID: accountID, Email: email, Status: "READY"}
 		if cooldown.Valid && now.Before(cooldown.Time) {
@@ -125,6 +130,58 @@ func (s *Supervisor) DiscoverAccounts(ctx context.Context) ([]Account, error) {
 		accounts = append(accounts, acc)
 	}
 	return accounts, nil
+}
+
+// parseCooldownTime accepts the mixed cooldown_until encodings found in the
+// wild: DATETIME strings written by Go, and unix-epoch REALs written by the
+// legacy Python rotator.
+func parseCooldownTime(raw any) (time.Time, bool) {
+	switch v := raw.(type) {
+	case nil:
+		return time.Time{}, false
+	case time.Time:
+		return v, !v.IsZero()
+	case int64:
+		return unixSecondsToTime(float64(v))
+	case float64:
+		return unixSecondsToTime(v)
+	case []byte:
+		return parseCooldownTime(string(v))
+	case string:
+		s := strings.TrimSpace(v)
+		if s == "" {
+			return time.Time{}, false
+		}
+		for _, layout := range []string{
+			"2006-01-02 15:04:05.999999999-07:00",
+			"2006-01-02 15:04:05",
+			"2006-01-02T15:04:05Z07:00",
+			time.RFC3339Nano,
+			time.RFC3339,
+		} {
+			if t, err := time.Parse(layout, s); err == nil {
+				return t, true
+			}
+		}
+		var f float64
+		if _, err := fmt.Sscanf(s, "%f", &f); err == nil {
+			return unixSecondsToTime(f)
+		}
+		return time.Time{}, false
+	}
+	return time.Time{}, false
+}
+
+func unixSecondsToTime(f float64) (time.Time, bool) {
+	if f <= 0 {
+		return time.Time{}, false
+	}
+	// Tolerate millisecond-epoch values.
+	for f > 1e12 {
+		f /= 1000
+	}
+	secs := int64(f)
+	return time.Unix(secs, int64((f - float64(secs)) * 1e9)), true
 }
 
 // RecordCooldown marks an account in cooldown for duration.

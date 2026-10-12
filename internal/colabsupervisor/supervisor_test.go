@@ -97,6 +97,33 @@ func TestColabSupervisorBusyGuard(t *testing.T) {
 	<-done
 }
 
+func TestParseCooldownTimeMixedEncodings(t *testing.T) {
+	future := time.Now().Add(2 * time.Hour).Truncate(time.Second)
+	unixFloat := float64(future.Unix()) + 0.5
+
+	cases := []any{
+		unixFloat,                            // legacy Python REAL
+		int64(future.Unix()),                 // integer epoch
+		future.UTC().Format("2006-01-02 15:04:05"), // bare DATETIME (UTC, e.g. CURRENT_TIMESTAMP)
+		future.Format(time.RFC3339),          // RFC3339 string with offset
+	}
+	for i, raw := range cases {
+		got, ok := parseCooldownTime(raw)
+		if !ok {
+			t.Fatalf("case %d (%T): not parsed", i, raw)
+		}
+		// Compare instants: DATETIME strings without offset parse as UTC.
+		if diff := got.Unix() - future.Unix(); diff > 60 || diff < -60 {
+			t.Fatalf("case %d: got unix %d, want ~%d", i, got.Unix(), future.Unix())
+		}
+	}
+	for _, raw := range []any{nil, "", "not-a-time", float64(-1)} {
+		if _, ok := parseCooldownTime(raw); ok {
+			t.Fatalf("expected parse failure for %v", raw)
+		}
+	}
+}
+
 func TestColabSupervisorLifecycle(t *testing.T) {
 	db := setupTestDB(t)
 	tmpDir, err := os.MkdirTemp("", "colab-tokens-*")
