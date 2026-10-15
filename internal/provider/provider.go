@@ -232,15 +232,16 @@ func (u UpstreamState) Empty() bool {
 }
 
 type ChatRequest struct {
-	Model       string        `json:"model"`
-	SessionID   string        `json:"session_id,omitempty"`
-	Messages    []Message     `json:"messages"`
-	Tools       []Tool        `json:"tools,omitempty"`
-	ToolChoice  any           `json:"tool_choice,omitempty"`
-	Stream      bool          `json:"stream,omitempty"`
-	Temperature *float32      `json:"temperature,omitempty"`
-	MaxTokens   int           `json:"max_tokens,omitempty"`
-	Upstream    UpstreamState `json:"upstream,omitempty"`
+	Model           string        `json:"model"`
+	ReasoningEffort string        `json:"reasoning_effort,omitempty"`
+	SessionID       string        `json:"session_id,omitempty"`
+	Messages        []Message     `json:"messages"`
+	Tools           []Tool        `json:"tools,omitempty"`
+	ToolChoice      any           `json:"tool_choice,omitempty"`
+	Stream          bool          `json:"stream,omitempty"`
+	Temperature     *float32      `json:"temperature,omitempty"`
+	MaxTokens       int           `json:"max_tokens,omitempty"`
+	Upstream        UpstreamState `json:"upstream,omitempty"`
 }
 
 func (r ChatRequest) HasImages() bool {

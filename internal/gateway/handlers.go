@@ -327,7 +327,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if sessionID != "" {
 		w.Header().Set("X-Session-ID", sessionID)
 	}
-	chatReq := provider.ChatRequest{Model: req.Model, SessionID: sessionID, Messages: req.Messages, Tools: req.Tools, ToolChoice: req.ToolChoice, Stream: req.Stream, Temperature: req.Temperature, MaxTokens: req.MaxTokens}
+	chatReq := provider.ChatRequest{Model: req.Model, ReasoningEffort: req.ReasoningEffort, SessionID: sessionID, Messages: req.Messages, Tools: req.Tools, ToolChoice: req.ToolChoice, Stream: req.Stream, Temperature: req.Temperature, MaxTokens: req.MaxTokens}
 	isWorkerModel := false
 		if spec, ok := h.Models.Get(req.Model); ok && (spec.Provider == "google_colab" || spec.Provider == "vllm") {
 			isWorkerModel = true

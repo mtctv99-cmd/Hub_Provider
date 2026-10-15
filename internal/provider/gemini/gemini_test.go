@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,45 @@ func TestPayloadHasFReqAnd69Slots(t *testing.T) {
 	body := BuildPayload("hello", "gemini-3.8-flash", "xsrf", "uuid", ConversationMetadata{}, nil)
 	if !strings.Contains(body, "f.req=") || !strings.Contains(body, "at=xsrf") {
 		t.Fatalf("payload missing required fields: %s", body)
+	}
+}
+
+func TestArgonPayloadAndThinkingEffort(t *testing.T) {
+	for _, tc := range []struct {
+		effort string
+		want   int
+	}{{"low", 1}, {"medium", 1}, {"high", 2}} {
+		header, err := chatRPCHeader("gemini-4-argon", tc.effort)
+		if err != nil {
+			t.Fatalf("chatRPCHeader(%q): %v", tc.effort, err)
+		}
+		var headerFields []any
+		if err := json.Unmarshal([]byte(header), &headerFields); err != nil {
+			t.Fatal(err)
+		}
+		if headerFields[4] != "95a4c0abcba24364" || headerFields[14] != float64(8) || headerFields[15] != float64(tc.want) {
+			t.Fatalf("header for %s = %s", tc.effort, header)
+		}
+
+		body := BuildPayloadWithThinking("hello", "gemini-4-argon", "", "uuid", ConversationMetadata{}, nil, tc.effort)
+		form, err := url.ParseQuery(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var outer []any
+		if err := json.Unmarshal([]byte(form.Get("f.req")), &outer); err != nil {
+			t.Fatal(err)
+		}
+		var inner []any
+		if err := json.Unmarshal([]byte(outer[1].(string)), &inner); err != nil {
+			t.Fatal(err)
+		}
+		if len(inner) != geminiPayloadSlots || inner[3] != "gemini-4-argon" || inner[79] != float64(8) || inner[80] != float64(tc.want) {
+			t.Fatalf("payload for %s has unexpected model/thinking slots", tc.effort)
+		}
+	}
+	if _, err := chatRPCHeader("gemini-4-argon", "maximum"); err == nil {
+		t.Fatal("expected unsupported thinking effort to be rejected")
 	}
 }
 
@@ -82,7 +122,7 @@ func TestGenerateUsesInjectedRPCServer(t *testing.T) {
 	client := &http.Client{}
 	a := New(client)
 	a.SetBaseURL(server.URL)
-	text, meta, err := a.Generate(context.Background(), "hello", "model", "", ConversationMetadata{})
+	text, meta, err := a.Generate(context.Background(), "hello", "gemini-3.8-flash", "", ConversationMetadata{})
 	if err != nil {
 		t.Fatalf("guest-compatible Generate failed: %v", err)
 	}

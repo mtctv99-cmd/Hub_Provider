@@ -58,7 +58,7 @@ func (h *Handler) AnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	if sessionID != "" {
 		w.Header().Set("X-Session-ID", sessionID)
 	}
-	chatReq := provider.ChatRequest{Model: req.Model, SessionID: sessionID, Messages: req.Messages, MaxTokens: req.MaxTokens, Stream: req.Stream}
+	chatReq := provider.ChatRequest{Model: req.Model, ReasoningEffort: req.ReasoningEffort, SessionID: sessionID, Messages: req.Messages, MaxTokens: req.MaxTokens, Stream: req.Stream}
 	if req.Stream {
 		h.streamAnthropic(w, r.Context(), chatReq)
 		return

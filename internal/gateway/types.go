@@ -8,13 +8,14 @@ import (
 )
 
 type ChatCompletionRequest struct {
-	Model       string             `json:"model"`
-	Messages    []provider.Message `json:"messages"`
-	Tools       []provider.Tool    `json:"tools,omitempty"`
-	ToolChoice  any                `json:"tool_choice,omitempty"`
-	Stream      bool               `json:"stream,omitempty"`
-	Temperature *float32           `json:"temperature,omitempty"`
-	MaxTokens   int                `json:"max_tokens,omitempty"`
+	Model           string             `json:"model"`
+	ReasoningEffort string             `json:"reasoning_effort,omitempty"`
+	Messages        []provider.Message `json:"messages"`
+	Tools           []provider.Tool    `json:"tools,omitempty"`
+	ToolChoice      any                `json:"tool_choice,omitempty"`
+	Stream          bool               `json:"stream,omitempty"`
+	Temperature     *float32           `json:"temperature,omitempty"`
+	MaxTokens       int                `json:"max_tokens,omitempty"`
 }
 
 type ChatCompletionResponse struct {
@@ -53,10 +54,11 @@ type VideoGenerationRequest struct {
 }
 
 type AnthropicMessageRequest struct {
-	Model     string             `json:"model"`
-	Messages  []provider.Message `json:"messages"`
-	MaxTokens int                `json:"max_tokens,omitempty"`
-	Stream    bool               `json:"stream,omitempty"`
+	Model           string             `json:"model"`
+	ReasoningEffort string             `json:"reasoning_effort,omitempty"`
+	Messages        []provider.Message `json:"messages"`
+	MaxTokens       int                `json:"max_tokens,omitempty"`
+	Stream          bool               `json:"stream,omitempty"`
 }
 
 type TTSGenerateRequest struct {

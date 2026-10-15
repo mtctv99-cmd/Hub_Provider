@@ -58,7 +58,7 @@ func (a *Adapter) Chat(ctx context.Context, req provider.ChatRequest, secret []b
 		}
 	}
 	metadata := ConversationMetadata{ConversationID: req.Upstream.ConversationID, ResponseID: req.Upstream.ResponseID, ChoiceID: req.Upstream.ChoiceID}
-	text, returned, err := a.GenerateWithFiles(ctx, prompt, req.Model, cookie, metadata, files)
+	text, returned, err := a.GenerateWithFilesAndThinking(ctx, prompt, req.Model, cookie, metadata, files, req.ReasoningEffort)
 	if err != nil {
 		return provider.ChatResponse{}, err
 	}
@@ -131,7 +131,7 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, secr
 		}
 	}
 	metadata := ConversationMetadata{ConversationID: req.Upstream.ConversationID, ResponseID: req.Upstream.ResponseID, ChoiceID: req.Upstream.ChoiceID}
-	body := BuildPayload(prompt, modelName(model), tokens.XSRF, "", metadata, files)
+	body := BuildPayloadWithThinking(prompt, modelName(model), tokens.XSRF, "", metadata, files, req.ReasoningEffort)
 	u, _ := url.Parse(a.BaseURL + "/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate")
 	q := u.Query()
 	q.Set("bl", tokens.BL)
@@ -150,9 +150,16 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, secr
 	for key, value := range headers(cookie, SapisidFromCookie(cookie), time.Now()) {
 		httpReq.Header[key] = value
 	}
-	httpReq.Header.Set("x-goog-ext-525001261-jspb", `[1,null,null,null,"71c2d248d3b102ff"]`)
+	rpcHeader, err := chatRPCHeader(model, req.ReasoningEffort)
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("x-goog-ext-525001261-jspb", rpcHeader)
 
 	streamTimeout := streamDeadline(a.Client)
+	if modelName(model) == "gemini-4-argon" && streamTimeout < 900*time.Second {
+		streamTimeout = 900 * time.Second
+	}
 	streamClient := &http.Client{Transport: a.Client.Transport, Timeout: streamTimeout}
 	resp, err := streamClient.Do(httpReq)
 	if err != nil {
@@ -314,7 +321,11 @@ func (a *Adapter) Generate(ctx context.Context, prompt, model, cookie string, me
 }
 
 func (a *Adapter) GenerateWithFiles(ctx context.Context, prompt, model, cookie string, metadata ConversationMetadata, files []UploadedFile) (string, ConversationMetadata, error) {
-	raw, err := a.generateRaw(ctx, prompt, model, cookie, metadata, files, 0)
+	return a.GenerateWithFilesAndThinking(ctx, prompt, model, cookie, metadata, files, "")
+}
+
+func (a *Adapter) GenerateWithFilesAndThinking(ctx context.Context, prompt, model, cookie string, metadata ConversationMetadata, files []UploadedFile, reasoningEffort string) (string, ConversationMetadata, error) {
+	raw, err := a.generateRaw(ctx, prompt, model, cookie, metadata, files, 0, reasoningEffort)
 	if err != nil {
 		return "", ConversationMetadata{}, err
 	}
@@ -327,7 +338,7 @@ func (a *Adapter) GenerateWithFiles(ctx context.Context, prompt, model, cookie s
 
 // generateRaw shares Gemini's token, payload, and StreamGenerate request path.
 // A positive maxBytes bounds responses that need strict structural parsing.
-func (a *Adapter) generateRaw(ctx context.Context, prompt, model, cookie string, metadata ConversationMetadata, files []UploadedFile, maxBytes int64) (string, error) {
+func (a *Adapter) generateRaw(ctx context.Context, prompt, model, cookie string, metadata ConversationMetadata, files []UploadedFile, maxBytes int64, reasoningEffort string) (string, error) {
 	if model == "" {
 		model = a.DefaultModel
 	}
@@ -339,7 +350,7 @@ func (a *Adapter) generateRaw(ctx context.Context, prompt, model, cookie string,
 	if tokens.XSRF == "" {
 		return "", fmt.Errorf("gemini page did not expose XSRF token")
 	}
-	body := BuildPayload(prompt, modelName(model), tokens.XSRF, "", metadata, files)
+	body := BuildPayloadWithThinking(prompt, modelName(model), tokens.XSRF, "", metadata, files, reasoningEffort)
 	u, _ := url.Parse(a.BaseURL + "/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate")
 	q := u.Query()
 	q.Set("bl", tokens.BL)
@@ -357,7 +368,11 @@ func (a *Adapter) generateRaw(ctx context.Context, prompt, model, cookie string,
 	for key, value := range headers(cookie, SapisidFromCookie(cookie), time.Now()) {
 		req.Header[key] = value
 	}
-	req.Header.Set("x-goog-ext-525001261-jspb", `[1,null,null,null,"71c2d248d3b102ff"]`)
+	rpcHeader, err := chatRPCHeader(model, reasoningEffort)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("x-goog-ext-525001261-jspb", rpcHeader)
 	resp, err := a.Client.Do(req)
 	if err != nil {
 		return "", err

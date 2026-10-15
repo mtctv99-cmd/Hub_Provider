@@ -95,7 +95,7 @@ func TestStreamCutMidwayErrors(t *testing.T) {
 	defer srv.Close()
 	a := New(&http.Client{})
 	a.SetBaseURL(srv.URL)
-	ch, err := a.StreamChat(context.Background(), provider.ChatRequest{Model: "m"}, nil)
+	ch, err := a.StreamChat(context.Background(), provider.ChatRequest{Model: "gemini-3.8-flash"}, nil)
 	if err != nil {
 		t.Fatalf("StreamChat: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestStreamContextCancelErrors(t *testing.T) {
 	a := New(&http.Client{})
 	a.SetBaseURL(srv.URL)
 	ctx, cancel := context.WithCancel(context.Background())
-	ch, err := a.StreamChat(ctx, provider.ChatRequest{Model: "m"}, nil)
+	ch, err := a.StreamChat(ctx, provider.ChatRequest{Model: "gemini-3.8-flash"}, nil)
 	if err != nil {
 		t.Fatalf("StreamChat: %v", err)
 	}
