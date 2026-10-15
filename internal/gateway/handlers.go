@@ -699,6 +699,9 @@ func (h *Handler) DashboardStatus(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
+	if !h.requireAdmin(w, r) {
+		return
+	}
 	uptime := time.Since(h.StartedAt).Seconds()
 	if uptime < 1 {
 		uptime = 1

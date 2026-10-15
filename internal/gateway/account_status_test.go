@@ -27,7 +27,7 @@ func TestDashboardStatusIncludesCanonicalAccounts(t *testing.T) {
 	h.SetCredentials(detailReader{})
 	h.SetIdentityDetails(detailReader{})
 	r := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/internal/status", nil)
+	req := authenticatedDashboardRequest(t, h)
 	h.DashboardStatus(r, req)
 	if r.Code != http.StatusOK {
 		t.Fatalf("status=%d", r.Code)

@@ -11,10 +11,36 @@ import (
 	"testing"
 	"time"
 
+	"sever_provider/internal/admin"
 	"sever_provider/internal/db"
 	"sever_provider/internal/provider"
 	"sever_provider/internal/scheduler"
 )
+
+func authenticatedDashboardRequest(t *testing.T, h *Handler) *http.Request {
+	t.Helper()
+	t.Setenv("ADMIN_PASSWORD", "dashboard-test-password")
+	auth := admin.NewFromEnv()
+	token, err := auth.Login("dashboard-test-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.SetAdminAuth(auth)
+	req := httptest.NewRequest(http.MethodGet, "/internal/status", nil)
+	req.AddCookie(&http.Cookie{Name: admin.CookieName, Value: token})
+	return req
+}
+
+func TestDashboardStatusRequiresAdminSession(t *testing.T) {
+	h := NewHandler(nil, nil)
+	h.SetAdminAuth(admin.NewFromEnv())
+	router := NewRouter(h, "")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/internal/status", nil))
+	if w.Code != http.StatusUnauthorized || strings.Contains(w.Body.String(), "accounts") {
+		t.Fatalf("unauthenticated status request leaked data: status=%d body=%s", w.Code, w.Body.String())
+	}
+}
 
 func TestEmbeddedDashboard(t *testing.T) {
 	models := scheduler.NewModelRegistry()
@@ -96,7 +122,7 @@ func TestDashboardStatusUsesPersistedTrafficSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := httptest.NewRecorder()
-	h.DashboardStatus(w, httptest.NewRequest(http.MethodGet, "/internal/status", nil))
+	h.DashboardStatus(w, authenticatedDashboardRequest(t, h))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
