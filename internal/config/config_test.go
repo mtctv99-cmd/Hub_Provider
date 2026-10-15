@@ -77,3 +77,20 @@ func TestGemma4ModelsLoaded(t *testing.T) {
 		}
 	}
 }
+
+func TestGemini38FlashDeclaresReasoning(t *testing.T) {
+	cfg, err := Load("../../config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, ok := cfg.Models["gemini-3.8-flash"]
+	if !ok {
+		t.Fatal("gemini-3.8-flash missing from models.yaml")
+	}
+	for _, capability := range spec.Capabilities {
+		if capability == "reasoning" {
+			return
+		}
+	}
+	t.Fatal("gemini-3.8-flash does not declare reasoning support")
+}

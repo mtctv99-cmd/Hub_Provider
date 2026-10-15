@@ -17,7 +17,7 @@ import (
 
 func (a *Adapter) Name() string { return "gemini_web" }
 func (a *Adapter) Capabilities() []provider.Capability {
-	return []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming, provider.CapabilityVision, provider.CapabilityImage}
+	return []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming, provider.CapabilityReasoning, provider.CapabilityVision, provider.CapabilityImage}
 }
 func (a *Adapter) Speech(context.Context, provider.SpeechRequest, []byte) ([]byte, string, error) {
 	return nil, "", provider.ErrCapabilityUnsupported

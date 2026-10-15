@@ -3,7 +3,7 @@
 models:
   gemini-3.8-flash:
     provider: gemini_web
-    capabilities: [chat, streaming, vision, image_generation]
+    capabilities: [chat, streaming, vision, reasoning, image_generation]
     failover_to: [gemini-3.1-pro]
     timeout_sec: 90
   gemini-4-argon:

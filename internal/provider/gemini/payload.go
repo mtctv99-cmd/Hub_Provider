@@ -39,6 +39,10 @@ func BuildPayload(prompt, modelName, xsrf, conversationUUID string, metadata Con
 }
 
 func BuildPayloadWithThinking(prompt, modelName, xsrf, conversationUUID string, metadata ConversationMetadata, files []UploadedFile, reasoningEffort string) string {
+	if normalizedModel, normalizedEffort, err := resolveThinkingModel(modelName, reasoningEffort); err == nil {
+		modelName = normalizedModel
+		reasoningEffort = normalizedEffort
+	}
 	inner := make([]any, geminiPayloadSlots)
 	if len(files) > 0 {
 		refs := make([]any, 0, len(files))
@@ -103,10 +107,18 @@ func modelName(model string) string {
 	if model == "" {
 		return "gemini-3.8-flash"
 	}
+	if normalized, _, err := resolveThinkingModel(model, ""); err == nil {
+		return normalized
+	}
 	return model
 }
 
 func chatRPCHeader(model, reasoningEffort string) (string, error) {
+	var err error
+	model, reasoningEffort, err = resolveThinkingModel(model, reasoningEffort)
+	if err != nil {
+		return "", err
+	}
 	config, ok := webModels[modelName(model)]
 	if !ok {
 		return "", fmt.Errorf("unsupported Gemini Web model %q", model)
@@ -126,6 +138,33 @@ func chatRPCHeader(model, reasoningEffort string) (string, error) {
 	fields[16] = newUUID()
 	b, err := json.Marshal(fields)
 	return string(b), err
+}
+
+func resolveThinkingModel(model, effort string) (string, string, error) {
+	if model == "" {
+		model = "gemini-3.8-flash"
+	}
+	for _, suffix := range []string{"-low", "-medium", "-high"} {
+		if !strings.HasSuffix(model, suffix) {
+			continue
+		}
+		base := strings.TrimSuffix(model, suffix)
+		if _, ok := webModels[base]; !ok {
+			continue
+		}
+		aliasEffort := strings.TrimPrefix(suffix, "-")
+		if effort != "" && !strings.EqualFold(strings.TrimSpace(effort), aliasEffort) {
+			return "", "", fmt.Errorf("reasoning_effort %q conflicts with model suffix %q", effort, aliasEffort)
+		}
+		return base, aliasEffort, nil
+	}
+	if _, ok := webModels[model]; !ok {
+		return model, effort, nil
+	}
+	if _, err := thinkingLevel(effort); err != nil {
+		return "", "", err
+	}
+	return model, strings.ToLower(strings.TrimSpace(effort)), nil
 }
 
 // Gemini Web currently exposes standard and extended thinking in its request

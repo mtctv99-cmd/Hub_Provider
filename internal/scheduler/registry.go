@@ -8,11 +8,13 @@ import (
 )
 
 type ModelSpec struct {
-	ID           string
-	Provider     string
-	Capabilities []provider.Capability
-	FailoverTo   []string
-	TimeoutSec   int
+	ID              string
+	Provider        string
+	Capabilities    []provider.Capability
+	FailoverTo      []string
+	TimeoutSec      int
+	BaseModel       string
+	ReasoningEffort string
 	// GuestAllowed lets a model run without any stored credential (Gemini
 	// flash-lite guest mode). The adapter is called with an empty secret.
 	GuestAllowed bool
@@ -67,6 +69,34 @@ func (r *ModelRegistry) Register(spec ModelSpec) error {
 	r.models[spec.ID] = spec
 	return nil
 }
+
+// RegisterWithReasoningEffortAliases adds low, medium, and high aliases for
+// Gemini Web reasoning models while keeping other providers' model IDs intact.
+func (r *ModelRegistry) RegisterWithReasoningEffortAliases(spec ModelSpec) error {
+	if err := r.Register(spec); err != nil {
+		return err
+	}
+	if spec.Provider != "gemini_web" || !contains(spec.Capabilities, provider.CapabilityReasoning) {
+		return nil
+	}
+	for _, effort := range []string{"low", "medium", "high"} {
+		alias := spec
+		alias.ID = spec.ID + "-" + effort
+		alias.BaseModel = spec.ID
+		alias.ReasoningEffort = effort
+		alias.Capabilities = make([]provider.Capability, 0, len(spec.Capabilities))
+		for _, capability := range spec.Capabilities {
+			if capability != provider.CapabilityImage {
+				alias.Capabilities = append(alias.Capabilities, capability)
+			}
+		}
+		if err := r.Register(alias); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (r *ModelRegistry) Get(id string) (ModelSpec, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

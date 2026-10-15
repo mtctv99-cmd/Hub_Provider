@@ -34,6 +34,9 @@ func (h *Handler) AnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "model and messages are required", "invalid_request_error", "missing_parameter")
 		return
 	}
+	if !h.applyReasoningAlias(w, req.Model, &req.ReasoningEffort) {
+		return
+	}
 	hasImages := false
 	for _, message := range req.Messages {
 		if message.HasImages() {

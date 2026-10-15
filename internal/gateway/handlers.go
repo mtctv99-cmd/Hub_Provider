@@ -239,6 +239,22 @@ func (h *Handler) ModelsList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": items})
 }
 
+func (h *Handler) applyReasoningAlias(w http.ResponseWriter, model string, effort *string) bool {
+	if h.Models == nil {
+		return true
+	}
+	spec, ok := h.Models.Get(model)
+	if !ok || spec.BaseModel == "" {
+		return true
+	}
+	if *effort != "" && !strings.EqualFold(strings.TrimSpace(*effort), spec.ReasoningEffort) {
+		writeError(w, http.StatusBadRequest, "reasoning_effort conflicts with model effort suffix", "invalid_request_error", "reasoning_effort_conflict")
+		return false
+	}
+	*effort = spec.ReasoningEffort
+	return true
+}
+
 func (h *Handler) modelAvailable(spec scheduler.ModelSpec) bool {
 	if h.Breakers != nil && !h.Breakers.Get(spec.Provider).Allow(time.Now()) {
 		return false
@@ -300,6 +316,9 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Model == "" || len(req.Messages) == 0 {
 		writeError(w, 400, "model and messages are required", "invalid_request_error", "missing_parameter")
+		return
+	}
+	if !h.applyReasoningAlias(w, req.Model, &req.ReasoningEffort) {
 		return
 	}
 	hasImages := false

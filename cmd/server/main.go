@@ -61,7 +61,7 @@ func main() {
 		for _, name := range m.Capabilities {
 			caps = append(caps, provider.Capability(name))
 		}
-		_ = models.Register(scheduler.ModelSpec{ID: id, Provider: m.Provider, Capabilities: caps, FailoverTo: append([]string(nil), m.FailoverTo...), TimeoutSec: m.TimeoutSec, GuestAllowed: m.Guest})
+		_ = models.RegisterWithReasoningEffortAliases(scheduler.ModelSpec{ID: id, Provider: m.Provider, Capabilities: caps, FailoverTo: append([]string(nil), m.FailoverTo...), TimeoutSec: m.TimeoutSec, GuestAllowed: m.Guest})
 	}
 	registry := provider.NewRegistry()
 	piperAdapter := piper.New(os.Getenv("PIPER_BIN"), os.Getenv("PIPER_MODELS_DIR"))
@@ -212,12 +212,12 @@ func main() {
 			SourceRef:      "browser_profile:" + accountID,
 			Secret:         secretBytes,
 		}}
-			if _, err := identityManager.UpsertGoogleAccount(context.Background(), email, 1, specs); err != nil {
-				return fmt.Errorf("upsert google account: %w", err)
-			}
-			_ = identityManager.LinkSharedSourceRef(context.Background(), email, "browser_profile:"+accountID)
-			log.Printf("[AutoLogin] captured, validated upstream and marked HEALTHY for %s (profile=%s)", email, accountID)
-			return nil
+		if _, err := identityManager.UpsertGoogleAccount(context.Background(), email, 1, specs); err != nil {
+			return fmt.Errorf("upsert google account: %w", err)
+		}
+		_ = identityManager.LinkSharedSourceRef(context.Background(), email, "browser_profile:"+accountID)
+		log.Printf("[AutoLogin] captured, validated upstream and marked HEALTHY for %s (profile=%s)", email, accountID)
+		return nil
 	})
 	handler.SetBrowserManager(browserMgr)
 	// ponytail: sequential profile refresh. Upgrade to worker pool if profile count > 20.

@@ -66,6 +66,49 @@ func TestArgonPayloadAndThinkingEffort(t *testing.T) {
 	}
 }
 
+func TestReasoningEffortModelSuffixes(t *testing.T) {
+	for _, tc := range []struct {
+		base   string
+		effort string
+		think  float64
+	}{
+		{"gemini-3.8-flash", "low", 1},
+		{"gemini-3.1-pro", "medium", 1},
+		{"gemini-4-argon", "high", 2},
+	} {
+		alias := tc.base + "-" + tc.effort
+		header, err := chatRPCHeader(alias, "")
+		if err != nil {
+			t.Fatalf("chatRPCHeader(%q): %v", alias, err)
+		}
+		var headerFields []any
+		if err := json.Unmarshal([]byte(header), &headerFields); err != nil {
+			t.Fatal(err)
+		}
+		if headerFields[4] != webModels[tc.base].hex || headerFields[15] != tc.think {
+			t.Fatalf("suffix alias %q mapped to wrong upstream configuration: %s", alias, header)
+		}
+		form, err := url.ParseQuery(BuildPayloadWithThinking("hello", alias, "", "uuid", ConversationMetadata{}, nil, ""))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var outer []any
+		if err := json.Unmarshal([]byte(form.Get("f.req")), &outer); err != nil {
+			t.Fatal(err)
+		}
+		var inner []any
+		if err := json.Unmarshal([]byte(outer[1].(string)), &inner); err != nil {
+			t.Fatal(err)
+		}
+		if inner[3] != tc.base || inner[80] != tc.think {
+			t.Fatalf("payload suffix alias %q mapped incorrectly: model=%v effort=%v", alias, inner[3], inner[80])
+		}
+	}
+	if _, err := chatRPCHeader("gemini-3.8-flash-low", "high"); err == nil {
+		t.Fatal("conflicting explicit effort should be rejected")
+	}
+}
+
 func TestFormatPromptPreservesMultiTurnContext(t *testing.T) {
 	prompt := formatPrompt([]provider.Message{
 		{Role: "user", Content: "What is 2+2?"},
