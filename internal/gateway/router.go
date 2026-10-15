@@ -43,11 +43,11 @@ func newRouterFull(h *Handler, apiKey string, dbKeys *admin.APIKeys, maxBodyByte
 	mux.HandleFunc("/v1/video/generations", h.VideoGenerations)
 	mux.HandleFunc("/v1/videos/tasks/", h.VideoTask)
 	mux.HandleFunc("/v1/files/", h.Files)
-		mux.HandleFunc("/api/tts/voices", h.TTSVoices)
-		mux.HandleFunc("/api/tts/generate", h.TTSGenerate)
-		mux.HandleFunc("/api/tts/synthesize", h.LegacyTTS)
-		mux.HandleFunc("/v1/tts", h.LegacyTTS)
-		mux.HandleFunc("/api/tts/clone", h.TTSClone)
+	mux.HandleFunc("/api/tts/voices", h.TTSVoices)
+	mux.HandleFunc("/api/tts/generate", h.TTSGenerate)
+	mux.HandleFunc("/api/tts/synthesize", h.LegacyTTS)
+	mux.HandleFunc("/v1/tts", h.LegacyTTS)
+	mux.HandleFunc("/api/tts/clone", h.TTSClone)
 	mux.HandleFunc("/api/tts/jobs/", h.TTSJob)
 	mux.HandleFunc("/api/llm/jobs", h.LLMJobCreate)
 	mux.HandleFunc("/api/llm/jobs/", h.LLMJob)
@@ -105,42 +105,38 @@ func newRouterFull(h *Handler, apiKey string, dbKeys *admin.APIKeys, maxBodyByte
 	mux.HandleFunc("/admin/api/copilot/auto-login", h.CopilotAutoLogin)
 	mux.HandleFunc("/admin/api/copilot/auto-login/status", h.CopilotAutoLoginStatus)
 	mux.HandleFunc("/admin/api/copilot/auto-login/stop", h.CopilotAutoLoginStop)
-		mux.HandleFunc("/admin/api/copilot/refresh", h.AdminUnsupported)
-		mux.HandleFunc("/admin/api/copilot/delete", h.CopilotDelete)
-		mux.HandleFunc("/admin/api/deepseek/accounts", h.DeepSeekAccounts)
-		mux.HandleFunc("/admin/api/deepseek/auto-login", h.DeepSeekAutoLogin)
-		mux.HandleFunc("/admin/api/deepseek/auto-login/status", h.DeepSeekAutoLoginStatus)
-		mux.HandleFunc("/admin/api/deepseek/auto-login/stop", h.DeepSeekAutoLoginStop)
-		mux.HandleFunc("/admin/api/meta/accounts", h.MetaAccounts)
-		mux.HandleFunc("/admin/api/meta/auto-login", h.MetaAutoLogin)
-		mux.HandleFunc("/admin/api/meta/auto-login/status", h.MetaAutoLoginStatus)
-		mux.HandleFunc("/admin/api/meta/auto-login/stop", h.MetaAutoLoginStop)
-		mux.HandleFunc("/admin/api/traffic", h.TrafficHistory)
+	mux.HandleFunc("/admin/api/copilot/refresh", h.AdminUnsupported)
+	mux.HandleFunc("/admin/api/copilot/delete", h.CopilotDelete)
+	mux.HandleFunc("/admin/api/deepseek/accounts", h.DeepSeekAccounts)
+	mux.HandleFunc("/admin/api/deepseek/auto-login", h.DeepSeekAutoLogin)
+	mux.HandleFunc("/admin/api/deepseek/auto-login/status", h.DeepSeekAutoLoginStatus)
+	mux.HandleFunc("/admin/api/deepseek/auto-login/stop", h.DeepSeekAutoLoginStop)
+	mux.HandleFunc("/admin/api/meta/accounts", h.MetaAccounts)
+	mux.HandleFunc("/admin/api/meta/auto-login", h.MetaAutoLogin)
+	mux.HandleFunc("/admin/api/meta/auto-login/status", h.MetaAutoLoginStatus)
+	mux.HandleFunc("/admin/api/meta/auto-login/stop", h.MetaAutoLoginStop)
+	mux.HandleFunc("/admin/api/traffic", h.TrafficHistory)
 	mux.HandleFunc("/internal/status", h.DashboardStatus)
 	mux.HandleFunc("/internal/events", h.Events)
-	var staticHandler http.Handler
-	if fi, err := os.Stat("web/index.html"); err == nil && !fi.IsDir() {
-		staticHandler = http.StripPrefix("/web", http.FileServer(http.Dir("web")))
-	} else if staticFS, err := fs.Sub(web.StaticFS, "."); err == nil {
-		staticHandler = http.StripPrefix("/web", http.FileServer(http.FS(staticFS)))
+	staticFS, err := fs.Sub(web.StaticFS, ".")
+	if err == nil {
+		staticHandler := http.StripPrefix("/web", http.FileServer(http.FS(staticFS)))
+		mux.Handle("/web/", staticHandler)
+		mux.HandleFunc("/web", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/web/", http.StatusMovedPermanently)
+		})
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/" {
+				http.NotFound(w, r)
+				return
+			}
+			http.Redirect(w, r, "/web/", http.StatusFound)
+		})
 	}
-		if staticHandler != nil {
-			mux.Handle("/web/", staticHandler)
-			mux.HandleFunc("/web", func(w http.ResponseWriter, r *http.Request) {
-				http.Redirect(w, r, "/web/", http.StatusMovedPermanently)
-			})
-				mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-					if r.URL.Path != "/" {
-						http.NotFound(w, r)
-						return
-					}
-					http.Redirect(w, r, "/web/", http.StatusFound)
-				})
-		}
-		if _, err := os.Stat("models"); err == nil {
-			mux.Handle("/models/", http.StripPrefix("/models/", http.FileServer(http.Dir("models"))))
-		}
-		return withMiddleware(mux, h, apiKey, dbKeys, maxBodyBytes)
+	if _, err := os.Stat("models"); err == nil {
+		mux.Handle("/models/", http.StripPrefix("/models/", http.FileServer(http.Dir("models"))))
+	}
+	return withMiddleware(mux, h, apiKey, dbKeys, maxBodyBytes)
 }
 
 func withMiddleware(next http.Handler, h *Handler, apiKey string, dbKeys *admin.APIKeys, maxBodyBytes int64) http.Handler {
@@ -150,15 +146,15 @@ func withMiddleware(next http.Handler, h *Handler, apiKey string, dbKeys *admin.
 			if h != nil {
 				duration := time.Since(startedAt)
 				h.TotalDurationMs.Add(uint64(duration.Milliseconds()))
-					if isConsumerTraffic(r.URL.Path) && h.Traffic != nil {
-						go func(t time.Time, d time.Duration) {
-							ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-							defer cancel()
-							if err := h.Traffic.Record(ctx, t, d); err != nil {
-								log.Printf("[GATEWAY] traffic counter write failed: %v", err)
-							}
-						}(startedAt, duration)
-					}
+				if isConsumerTraffic(r.URL.Path) && h.Traffic != nil {
+					go func(t time.Time, d time.Duration) {
+						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+						defer cancel()
+						if err := h.Traffic.Record(ctx, t, d); err != nil {
+							log.Printf("[GATEWAY] traffic counter write failed: %v", err)
+						}
+					}(startedAt, duration)
+				}
 			}
 		}()
 		w.Header().Set("X-Request-ID", requestID())
@@ -198,15 +194,15 @@ func withMiddleware(next http.Handler, h *Handler, apiKey string, dbKeys *admin.
 
 		// API Key authentication applies only to consumer API endpoints.
 		// Admin, internal, health, static files, and inbound worker WebSocket use their own auth mechanisms.
-			requiresAPIKey := !strings.HasPrefix(p, "/admin/") &&
-				!strings.HasPrefix(p, "/internal/") &&
-				!strings.HasPrefix(p, "/web/") &&
-				!strings.HasPrefix(p, "/web") &&
-				!strings.HasPrefix(p, "/models/") &&
-				p != "/health" &&
-				p != "/ready" &&
-				p != "/" &&
-				p != "/api/llm/ws/worker"
+		requiresAPIKey := !strings.HasPrefix(p, "/admin/") &&
+			!strings.HasPrefix(p, "/internal/") &&
+			!strings.HasPrefix(p, "/web/") &&
+			!strings.HasPrefix(p, "/web") &&
+			!strings.HasPrefix(p, "/models/") &&
+			p != "/health" &&
+			p != "/ready" &&
+			p != "/" &&
+			p != "/api/llm/ws/worker"
 
 		if requiresAPIKey {
 			candidate := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))

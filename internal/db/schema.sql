@@ -63,6 +63,11 @@ CREATE TABLE IF NOT EXISTS request_traffic_hourly (
     duration_ms INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS request_traffic_minutely (
+    minute_start INTEGER PRIMARY KEY,
+    request_count INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS observability_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     request_id TEXT,
@@ -154,7 +159,7 @@ CREATE TABLE IF NOT EXISTS api_key_rate_windows (
 
 CREATE TABLE IF NOT EXISTS admin_sessions (
     token_hash TEXT PRIMARY KEY,
-    expires_at DATETIME NOT NULL,
+    expires_at INTEGER NOT NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

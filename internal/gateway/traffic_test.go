@@ -117,6 +117,39 @@ func TestTrafficStoreAndEndpoint(t *testing.T) {
 	_ = postResp.Body.Close()
 }
 
+func TestTrafficSummaryPersistsAcrossStoreRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "traffic.sqlite")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewTrafficStore(database.DB)
+	now := time.Now().UTC()
+	if err := store.Record(context.Background(), now, 125*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordMetrics(context.Background(), now, 0, 42, 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restartedDB, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restartedDB.Close()
+	restartedStore := NewTrafficStore(restartedDB.DB)
+	summary, err := restartedStore.Summary(context.Background(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Requests != 1 || summary.DurationMs != 125 || summary.Tokens != 42 || summary.AudioSec != 3 || summary.RequestsThisMinute != 1 {
+		t.Fatalf("persisted traffic summary = %+v", summary)
+	}
+}
+
 func TestIsConsumerTraffic(t *testing.T) {
 	cases := map[string]bool{
 		"/v1/chat/completions":      true,

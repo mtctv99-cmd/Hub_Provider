@@ -329,31 +329,31 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	chatReq := provider.ChatRequest{Model: req.Model, ReasoningEffort: req.ReasoningEffort, SessionID: sessionID, Messages: req.Messages, Tools: req.Tools, ToolChoice: req.ToolChoice, Stream: req.Stream, Temperature: req.Temperature, MaxTokens: req.MaxTokens}
 	isWorkerModel := false
-		if spec, ok := h.Models.Get(req.Model); ok && (spec.Provider == "google_colab" || spec.Provider == "vllm") {
-			isWorkerModel = true
-		} else if h.Workers != nil && h.Workers.Available(req.Model) {
-			isWorkerModel = true
+	if spec, ok := h.Models.Get(req.Model); ok && (spec.Provider == "google_colab" || spec.Provider == "vllm") {
+		isWorkerModel = true
+	} else if h.Workers != nil && h.Workers.Available(req.Model) {
+		isWorkerModel = true
+	}
+	if isWorkerModel {
+		if req.Stream {
+			h.streamColab(w, ctx, chatReq)
+			return
 		}
-		if isWorkerModel {
-			if req.Stream {
-				h.streamColab(w, ctx, chatReq)
-				return
-			}
-			if h.Workers == nil {
-				writeError(w, http.StatusServiceUnavailable, "Worker unavailable", "provider_error", "worker_unavailable")
-				return
-			}
-			resp, err := h.Workers.Chat(ctx, chatReq)
-			if err != nil {
-				log.Printf("[GATEWAY] colab chat failed: %v", err)
-				status, message, code := maskColabError(err)
-				writeError(w, status, message, "provider_error", code)
-				return
-			}
-			if strings.TrimSpace(resp.Content) == "" && strings.TrimSpace(resp.ReasoningContent) == "" && len(resp.ToolCalls) == 0 {
-				writeError(w, http.StatusBadGateway, "upstream worker returned empty response", "provider_error", "empty_response")
-				return
-			}
+		if h.Workers == nil {
+			writeError(w, http.StatusServiceUnavailable, "Worker unavailable", "provider_error", "worker_unavailable")
+			return
+		}
+		resp, err := h.Workers.Chat(ctx, chatReq)
+		if err != nil {
+			log.Printf("[GATEWAY] colab chat failed: %v", err)
+			status, message, code := maskColabError(err)
+			writeError(w, status, message, "provider_error", code)
+			return
+		}
+		if strings.TrimSpace(resp.Content) == "" && strings.TrimSpace(resp.ReasoningContent) == "" && len(resp.ToolCalls) == 0 {
+			writeError(w, http.StatusBadGateway, "upstream worker returned empty response", "provider_error", "empty_response")
+			return
+		}
 		resp.Usage = provider.ComputeUsage(req.Messages, req.Tools, resp.Content, resp.ReasoningContent, resp.ToolCalls, &resp.Usage)
 		h.AITokens.Add(uint64(resp.Usage.TotalTokens))
 		if h.Traffic != nil && resp.Usage.TotalTokens > 0 {
@@ -704,6 +704,29 @@ func (h *Handler) DashboardStatus(w http.ResponseWriter, r *http.Request) {
 		uptime = 1
 	}
 	requests := h.Requests.Load()
+	totalDurationMs := h.TotalDurationMs.Load()
+	aiTokens := h.AITokens.Load()
+	requestsPerSecond := float64(requests) / uptime
+	requestsPerMinute := float64(requests) * 60 / uptime
+	metricsSource := "process"
+	if h.Traffic != nil {
+		now := time.Now().UTC()
+		summary, err := h.Traffic.Summary(r.Context(), now)
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "dashboard metrics are temporarily unavailable", "server_error", "dashboard_metrics_unavailable")
+			return
+		}
+		requests = uint64(summary.Requests)
+		totalDurationMs = uint64(summary.DurationMs)
+		aiTokens = uint64(summary.Tokens)
+		minuteElapsed := now.UTC().Sub(now.UTC().Truncate(time.Minute)).Seconds()
+		if minuteElapsed < 1 {
+			minuteElapsed = 1
+		}
+		requestsPerMinute = float64(summary.RequestsThisMinute) * 60 / minuteElapsed
+		requestsPerSecond = requestsPerMinute / 60
+		metricsSource = "persistent"
+	}
 	voiceStats := make(map[string]uint64)
 	h.VoiceStats.Range(func(key, value any) bool {
 		if name, ok := key.(string); ok {
@@ -717,10 +740,11 @@ func (h *Handler) DashboardStatus(w http.ResponseWriter, r *http.Request) {
 		"status":              "ok",
 		"models":              len(h.Models.List()),
 		"requests_total":      requests,
-		"requests_per_second": float64(requests) / uptime,
-		"requests_per_minute": float64(requests) * 60 / uptime,
-		"total_duration_ms":   h.TotalDurationMs.Load(),
-		"ai_tokens_total":     h.AITokens.Load(),
+		"requests_per_second": requestsPerSecond,
+		"requests_per_minute": requestsPerMinute,
+		"total_duration_ms":   totalDurationMs,
+		"ai_tokens_total":     aiTokens,
+		"metrics_source":      metricsSource,
 		"voice_requests":      voiceStats,
 		"endpoint_urls": map[string]string{
 			"chat":   "/v1/chat/completions",
@@ -747,9 +771,9 @@ func (h *Handler) DashboardStatus(w http.ResponseWriter, r *http.Request) {
 	} else {
 		status["breakers"] = map[string]string{}
 	}
-		if h.Credentials != nil {
-			for _, domain := range []string{"gemini_web", "google_colab", "copilot_ws", "piper_local", "tiktok_api", "deepseek_web", "meta_web"} {
-				items, err := h.Credentials.List(r.Context(), domain)
+	if h.Credentials != nil {
+		for _, domain := range []string{"gemini_web", "google_colab", "copilot_ws", "piper_local", "tiktok_api", "deepseek_web", "meta_web"} {
+			items, err := h.Credentials.List(r.Context(), domain)
 			if err == nil {
 				if h.Leases != nil {
 					for i := range items {

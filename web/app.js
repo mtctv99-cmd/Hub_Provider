@@ -643,18 +643,18 @@ async function refresh() {
       return;
     }
 
-    const reqTotal = status.requests_total ?? 0;
-    const reqPerMin = (status.requests_per_minute ?? 0).toFixed(2);
-    const aiTokens = (status.ai_tokens_total ?? 0).toLocaleString();
+    const reqTotal = Number(status.requests_total ?? 0);
+    const reqPerMin = Number(status.requests_per_minute ?? 0).toFixed(1);
+    const aiTokens = Number(status.ai_tokens_total ?? 0).toLocaleString();
     
     if ($('#row1-req-total')) $('#row1-req-total').textContent = reqTotal.toLocaleString();
     if ($('#row1-req-min')) $('#row1-req-min').textContent = reqPerMin;
     if ($('#row1-ai-tokens')) $('#row1-ai-tokens').textContent = aiTokens;
 
     // Cập nhật các chỉ số traffic và bộ đếm theo nhà cung cấp
-    const reqPerSec = (status.requests_per_second ?? 0).toFixed(2);
+    const reqPerSec = Number(status.requests_per_second ?? 0).toFixed(2);
     if ($('#row2-req-sec')) $('#row2-req-sec').textContent = reqPerSec;
-    const totalDurationMs = Number(status.total_duration_ms || 0);
+    const totalDurationMs = Number(status.total_duration_ms ?? 0);
     const averageLatencyMs = reqTotal > 0 ? Math.round(totalDurationMs / reqTotal) : 0;
     if ($('#row2-total-duration')) $('#row2-total-duration').textContent = formatDuration(totalDurationMs);
     if ($('#row2-avg-latency')) $('#row2-avg-latency').textContent = `${averageLatencyMs} ms avg`;
@@ -673,8 +673,19 @@ async function refresh() {
     }
     await loadTrafficHistory();
     $('#last-sync').textContent = new Date().toLocaleTimeString();
+    const refreshStatus = $('#dashboard-refresh-status');
+    if (refreshStatus) {
+      refreshStatus.textContent = status.metrics_source === 'persistent'
+        ? 'Đã đồng bộ · số liệu lưu bền vững'
+        : 'Đã đồng bộ · bộ đếm phiên hiện tại';
+      refreshStatus.classList.remove('is-error');
+    }
   } catch (e) {
-    // Dashboard remains usable even when a telemetry refresh is temporarily unavailable.
+    const refreshStatus = $('#dashboard-refresh-status');
+    if (authReady && refreshStatus) {
+      refreshStatus.textContent = `Không cập nhật được: ${e.message || 'lỗi kết nối'}`;
+      refreshStatus.classList.add('is-error');
+    }
   } finally {
     refreshInFlight = false;
     if (refreshQueued) {

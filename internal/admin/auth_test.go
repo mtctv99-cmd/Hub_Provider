@@ -15,6 +15,7 @@ func newAuthTestDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 	_, err = db.Exec(`CREATE TABLE admin_credentials (
 		id TEXT PRIMARY KEY,
@@ -28,7 +29,48 @@ func newAuthTestDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
+	_, err = db.Exec(`CREATE TABLE admin_sessions (
+		token_hash TEXT PRIMARY KEY,
+		expires_at INTEGER NOT NULL,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	)`)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return db
+}
+
+func TestAdminSessionSurvivesAuthRecreationAndLogoutRevokesIt(t *testing.T) {
+	t.Setenv("ADMIN_PASSWORD", "persisted-session-pass")
+	db := newAuthTestDB(t)
+	first, err := NewFromEnvWithDB(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := first.Login("persisted-session-pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterRestart, err := NewFromEnvWithDB(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !afterRestart.ValidToken(token) {
+		t.Fatal("admin session should remain valid after the auth service is recreated")
+	}
+
+	afterRestart.Logout(token)
+	afterLogout, err := NewFromEnvWithDB(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterLogout.ValidToken(token) {
+		t.Fatal("logged-out session must not remain valid in persistent storage")
+	}
+	var storedToken string
+	if err := db.QueryRow(`SELECT token_hash FROM admin_sessions LIMIT 1`).Scan(&storedToken); err == nil {
+		t.Fatal("raw session tokens must not be stored in SQLite")
+	}
 }
 
 func TestDefaultAdminPasswordAndFirstLogin(t *testing.T) {

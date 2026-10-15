@@ -23,6 +23,7 @@ func setupTestDBForGateway(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("failed to open sqlite in-memory: %v", err)
 	}
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 
 	schema := `
@@ -97,6 +98,11 @@ func setupTestDBForGateway(t *testing.T) *sql.DB {
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			password_changed_at DATETIME
+		);
+		CREATE TABLE IF NOT EXISTS admin_sessions (
+			token_hash TEXT PRIMARY KEY,
+			expires_at INTEGER NOT NULL,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);
 	`
 	if _, err := db.Exec(schema); err != nil {

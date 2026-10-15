@@ -4,7 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Sever Provider Studio</title>
-  <link rel="stylesheet" href="/web/style.css?v=2" />
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="/web/style.css?v=3" />
 </head>
 <body>
   <section id="auth-overlay" class="auth-overlay" aria-modal="true" role="dialog">
@@ -128,29 +129,29 @@
           <div class="traffic-metrics">
             <div class="traffic-metric">
               <span class="traffic-metric-label">Tổng requests</span>
-              <strong class="traffic-metric-value" id="row1-req-total">0</strong>
-              <span class="traffic-metric-detail"><span id="row1-req-min">0.00</span> req/phút</span>
+              <strong class="traffic-metric-value" id="row1-req-total">—</strong>
+              <span class="traffic-metric-detail"><span id="row1-req-min">—</span> req/phút (ước tính)</span>
             </div>
             <div class="traffic-metric">
               <span class="traffic-metric-label">Tokens AI</span>
-              <strong class="traffic-metric-value" id="row1-ai-tokens">0</strong>
+              <strong class="traffic-metric-value" id="row1-ai-tokens">—</strong>
               <span class="traffic-metric-detail">Đã sử dụng</span>
             </div>
             <div class="traffic-metric">
               <span class="traffic-metric-label">Tốc độ</span>
-              <strong class="traffic-metric-value"><span id="row2-req-sec">0.00</span><small> req/giây</small></strong>
-              <span class="traffic-metric-detail">Hiện tại</span>
+              <strong class="traffic-metric-value"><span id="row2-req-sec">—</span><small> req/giây</small></strong>
+              <span class="traffic-metric-detail">Ước tính trong phút này</span>
             </div>
             <div class="traffic-metric">
               <span class="traffic-metric-label">Thời gian xử lý</span>
-              <strong class="traffic-metric-value" id="row2-total-duration">0s</strong>
-              <span class="traffic-metric-detail" id="row2-avg-latency">0 ms avg</span>
+              <strong class="traffic-metric-value" id="row2-total-duration">—</strong>
+              <span class="traffic-metric-detail" id="row2-avg-latency">— ms trung bình</span>
             </div>
           </div>
         </div>
       </section>
 
-      <section class="provider-cards-grid" aria-label="Thống kê request theo nhà cung cấp">
+      <section class="provider-cards-grid" aria-label="Số lượt chat trong 100 sự kiện audit gần nhất">
         <div class="provider-stat-card card-gemini">
           <div class="provider-stat-header">
             <span class="provider-card-icon google">
@@ -159,8 +160,8 @@
             <span class="provider-card-name">Gemini</span>
           </div>
           <div class="provider-stat-body">
-            <strong class="provider-stat-value" id="status-google-requests">0</strong>
-            <span class="provider-stat-sub">requests</span>
+            <strong class="provider-stat-value" id="status-google-requests">—</strong>
+            <span class="provider-stat-sub">trong 100 audit gần nhất</span>
           </div>
         </div>
 
@@ -172,8 +173,8 @@
             <span class="provider-card-name">DeepSeek</span>
           </div>
           <div class="provider-stat-body">
-            <strong class="provider-stat-value" id="status-deepseek-requests">0</strong>
-            <span class="provider-stat-sub">requests</span>
+            <strong class="provider-stat-value" id="status-deepseek-requests">—</strong>
+            <span class="provider-stat-sub">trong 100 audit gần nhất</span>
           </div>
         </div>
 
@@ -185,8 +186,8 @@
             <span class="provider-card-name">TikTok TTS</span>
           </div>
           <div class="provider-stat-body">
-            <strong class="provider-stat-value" id="status-tiktok-requests">0</strong>
-            <span class="provider-stat-sub">requests</span>
+            <strong class="provider-stat-value" id="status-tiktok-requests">—</strong>
+            <span class="provider-stat-sub">trong 100 audit gần nhất</span>
           </div>
         </div>
 
@@ -198,8 +199,8 @@
             <span class="provider-card-name">Colab GPU</span>
           </div>
           <div class="provider-stat-body">
-            <strong class="provider-stat-value" id="status-colab-requests">0</strong>
-            <span class="provider-stat-sub">requests</span>
+            <strong class="provider-stat-value" id="status-colab-requests">—</strong>
+            <span class="provider-stat-sub">trong 100 audit gần nhất</span>
           </div>
         </div>
 
@@ -211,8 +212,8 @@
             <span class="provider-card-name">Copilot</span>
           </div>
           <div class="provider-stat-body">
-            <strong class="provider-stat-value" id="status-copilot-requests">0</strong>
-            <span class="provider-stat-sub">requests</span>
+            <strong class="provider-stat-value" id="status-copilot-requests">—</strong>
+            <span class="provider-stat-sub">trong 100 audit gần nhất</span>
           </div>
         </div>
 
@@ -224,8 +225,8 @@
             <span class="provider-card-name">Meta (muse.ai)</span>
           </div>
           <div class="provider-stat-body">
-            <strong class="provider-stat-value" id="status-meta-requests">0</strong>
-            <span class="provider-stat-sub">requests</span>
+            <strong class="provider-stat-value" id="status-meta-requests">—</strong>
+            <span class="provider-stat-sub">trong 100 audit gần nhất</span>
           </div>
         </div>
       </section>
@@ -467,6 +468,7 @@
   </dialog>
 
   <footer>
+    <span id="dashboard-refresh-status" role="status" aria-live="polite">Chưa đồng bộ</span>
     <span id="last-sync">—</span>
   </footer>
 
@@ -513,6 +515,6 @@
     </button>
   </nav>
 
-  <script src="/web/app.js?v=5"></script>
+  <script src="/web/app.js?v=6"></script>
 </body>
 </html>

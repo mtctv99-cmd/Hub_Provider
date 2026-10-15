@@ -2,6 +2,7 @@ package admin
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"errors"
@@ -124,10 +125,24 @@ func (a *Auth) Login(password string) (string, error) {
 		return "", err
 	}
 	token := hex.EncodeToString(buf)
+	expiresAt := time.Now().Add(a.ttl)
+	if a.db != nil {
+		if _, err := a.db.Exec(`DELETE FROM admin_sessions WHERE expires_at <= ?`, time.Now().Unix()); err != nil {
+			return "", err
+		}
+		if _, err := a.db.Exec(`INSERT INTO admin_sessions(token_hash, expires_at) VALUES(?, ?)`, hashToken(token), expiresAt.Unix()); err != nil {
+			return "", err
+		}
+	}
 	a.mu.Lock()
-	a.tokens[token] = time.Now().Add(a.ttl)
+	a.tokens[token] = expiresAt
 	a.mu.Unlock()
 	return token, nil
+}
+
+func hashToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
 
 func (a *Auth) ChangePassword(current, next string) error {
@@ -151,10 +166,14 @@ func (a *Auth) ChangePassword(current, next string) error {
 		if _, err := a.db.Exec(`UPDATE admin_credentials SET password_hash = ?, must_change_password = 0, updated_at = CURRENT_TIMESTAMP, password_changed_at = CURRENT_TIMESTAMP WHERE id = ?`, string(newHash), adminCredentialID); err != nil {
 			return err
 		}
+		if _, err := a.db.Exec(`DELETE FROM admin_sessions`); err != nil {
+			return err
+		}
 	}
 	a.mu.Lock()
 	a.passwordHash = string(newHash)
 	a.firstLogin = false
+	a.tokens = make(map[string]time.Time)
 	a.mu.Unlock()
 	return nil
 }
@@ -180,16 +199,20 @@ func (a *Auth) ValidToken(token string) bool {
 	}
 	now := time.Now()
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	expires, ok := a.tokens[token]
-	if !ok {
-		return false
+	if ok && now.Before(expires) {
+		a.mu.Unlock()
+		return true
 	}
-	if now.After(expires) {
+	if ok {
 		delete(a.tokens, token)
+	}
+	a.mu.Unlock()
+	if a.db == nil {
 		return false
 	}
-	return true
+	var valid int
+	return a.db.QueryRow(`SELECT COUNT(*) FROM admin_sessions WHERE token_hash=? AND expires_at > ?`, hashToken(token), now.Unix()).Scan(&valid) == nil && valid > 0
 }
 
 func (a *Auth) Logout(token string) {
@@ -199,6 +222,9 @@ func (a *Auth) Logout(token string) {
 	a.mu.Lock()
 	delete(a.tokens, token)
 	a.mu.Unlock()
+	if a.db != nil && token != "" {
+		_, _ = a.db.Exec(`DELETE FROM admin_sessions WHERE token_hash=?`, hashToken(token))
+	}
 }
 
 func (a *Auth) TokenFromRequest(r *http.Request) string {

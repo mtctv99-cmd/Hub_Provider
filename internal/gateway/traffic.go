@@ -16,8 +16,36 @@ func NewTrafficStore(db *sql.DB) *TrafficStore {
 	if db != nil {
 		_, _ = db.Exec(`ALTER TABLE request_traffic_hourly ADD COLUMN tokens INTEGER NOT NULL DEFAULT 0`)
 		_, _ = db.Exec(`ALTER TABLE request_traffic_hourly ADD COLUMN audio_sec INTEGER NOT NULL DEFAULT 0`)
+		_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS request_traffic_minutely (
+			minute_start INTEGER PRIMARY KEY,
+			request_count INTEGER NOT NULL DEFAULT 0
+		)`)
 	}
 	return s
+}
+
+type trafficSummary struct {
+	Requests           int64
+	DurationMs         int64
+	Tokens             int64
+	AudioSec           int64
+	RequestsThisMinute int64
+}
+
+func (s *TrafficStore) Summary(ctx context.Context, now time.Time) (trafficSummary, error) {
+	var summary trafficSummary
+	if s == nil || s.db == nil {
+		return summary, sql.ErrConnDone
+	}
+	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(request_count),0), COALESCE(SUM(duration_ms),0),
+		COALESCE(SUM(tokens),0), COALESCE(SUM(audio_sec),0) FROM request_traffic_hourly`).Scan(
+		&summary.Requests, &summary.DurationMs, &summary.Tokens, &summary.AudioSec)
+	if err != nil {
+		return trafficSummary{}, err
+	}
+	err = s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(request_count),0) FROM request_traffic_minutely WHERE minute_start=?`,
+		now.UTC().Truncate(time.Minute).Unix()).Scan(&summary.RequestsThisMinute)
+	return summary, err
 }
 
 func (s *TrafficStore) Record(ctx context.Context, at time.Time, duration time.Duration) error {
@@ -41,14 +69,27 @@ func (s *TrafficStore) recordHourly(ctx context.Context, at time.Time, requestCo
 		ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO request_traffic_hourly(hour_start, request_count, duration_ms, tokens, audio_sec)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO request_traffic_hourly(hour_start, request_count, duration_ms, tokens, audio_sec)
 		VALUES (?, ?, ?, ?, ?) ON CONFLICT(hour_start) DO UPDATE SET
 			request_count=request_count+excluded.request_count,
 			duration_ms=duration_ms+excluded.duration_ms,
 			tokens=tokens+excluded.tokens,
 			audio_sec=audio_sec+excluded.audio_sec`,
-		at.UTC().Truncate(time.Hour).Unix(), requestCount, duration.Milliseconds(), tokens, audioSec)
-	return err
+		at.UTC().Truncate(time.Hour).Unix(), requestCount, duration.Milliseconds(), tokens, audioSec); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO request_traffic_minutely(minute_start, request_count)
+		VALUES (?, ?) ON CONFLICT(minute_start) DO UPDATE SET request_count=request_count+excluded.request_count`,
+		at.UTC().Truncate(time.Minute).Unix(), requestCount); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 type trafficBucket struct {
