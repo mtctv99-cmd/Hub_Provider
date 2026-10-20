@@ -38,7 +38,7 @@ func TestGenerateTerminalInvalidRequest(t *testing.T) {
 	sess := Session{InvocationID: 0}
 	account := Account{TokenURL: wsURL}
 
-	_, err := adapter.generate(context.Background(), account, &sess, "hello", "copilot", "", nil)
+	_, err := adapter.generate(context.Background(), account, &sess, "hello", "copilot", nil, nil)
 	if err == nil {
 		t.Fatal("expected error on InvalidRequest, got nil")
 	}
@@ -71,7 +71,7 @@ func TestGenerateTerminalSuccessIncrementsCounter(t *testing.T) {
 	sess := Session{InvocationID: 0}
 	account := Account{TokenURL: wsURL}
 
-	full, err := adapter.generate(context.Background(), account, &sess, "hello", "copilot", "", nil)
+	full, err := adapter.generate(context.Background(), account, &sess, "hello", "copilot", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestGenerateMidStreamDisconnectReturnsError(t *testing.T) {
 	sess := Session{InvocationID: 0}
 	account := Account{TokenURL: wsURL}
 
-	_, err := adapter.generate(context.Background(), account, &sess, "hello", "copilot", "", nil)
+	_, err := adapter.generate(context.Background(), account, &sess, "hello", "copilot", nil, nil)
 	if err == nil {
 		t.Fatal("expected error on midstream socket drop, got nil (swallowed error!)")
 	}
@@ -144,7 +144,7 @@ func TestGenerateContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	_, err := adapter.generate(ctx, account, &sess, "hello", "copilot", "", nil)
+	_, err := adapter.generate(ctx, account, &sess, "hello", "copilot", nil, nil)
 	if err == nil {
 		t.Fatal("expected error on context cancellation, got nil")
 	}
@@ -175,7 +175,7 @@ func TestGenerateTerminalEmptyTextPreservesSessionAndReturnsEmptyResponse(t *tes
 	sess := Session{InvocationID: 5, ConversationTransferToken: "initial-token"}
 	account := Account{TokenURL: wsURL}
 
-	_, err := adapter.generate(context.Background(), account, &sess, "hello", "copilot", "", nil)
+	_, err := adapter.generate(context.Background(), account, &sess, "hello", "copilot", nil, nil)
 	if err == nil {
 		t.Fatal("expected empty text to return error")
 	}

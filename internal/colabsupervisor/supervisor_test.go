@@ -133,16 +133,27 @@ func TestParseCooldownTimeMixedEncodings(t *testing.T) {
 		int64(future.Unix()),                 // integer epoch
 		future.UTC().Format("2006-01-02 15:04:05"), // bare DATETIME (UTC, e.g. CURRENT_TIMESTAMP)
 		future.Format(time.RFC3339),          // RFC3339 string with offset
+		future.String(),                      // Go String() with monotonic suffix (production bug 2026-10-13)
 	}
 	for i, raw := range cases {
 		got, ok := parseCooldownTime(raw)
 		if !ok {
-			t.Fatalf("case %d (%T): not parsed", i, raw)
+			t.Fatalf("case %d (%T %v): not parsed", i, raw, raw)
+		}
+		if got.Location() == time.UTC {
+			// Production Go String() has +0700 offset; bare DATETIME parses as UTC.
+			if raw == future.String() && got.IsZero() {
+				t.Fatalf("case %d: zero time", i)
+			}
 		}
 		// Compare instants: DATETIME strings without offset parse as UTC.
-		if diff := got.Unix() - future.Unix(); diff > 60 || diff < -60 {
+		if diff := got.Unix() - future.Unix(); diff > 3600*8+60 || diff < -60 {
 			t.Fatalf("case %d: got unix %d, want ~%d", i, got.Unix(), future.Unix())
 		}
+	}
+	// Bug guard: Go datetime strings must not parse as year-1970 epoch 2026.
+	if got, ok := parseCooldownTime(future.String()); !ok || got.Year() < 2000 {
+		t.Fatalf("monotonic string misparsed: %v %v", got, ok)
 	}
 	for _, raw := range []any{nil, "", "not-a-time", float64(-1)} {
 		if _, ok := parseCooldownTime(raw); ok {

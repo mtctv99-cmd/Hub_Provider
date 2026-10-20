@@ -28,6 +28,7 @@ venv/
 # Workspace & Agents
 .zcode/
 .playwright/
+.playwright-mcp/
 
 # Secrets and provider session material
 .env

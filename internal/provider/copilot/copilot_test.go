@@ -1,7 +1,9 @@
 package copilot
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +14,55 @@ import (
 
 	"sever_provider/internal/provider"
 )
+
+func TestExtractImageDataURIsKeepsAllImages(t *testing.T) {
+	png := append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, 32)...)
+	uri := "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)
+	messages := []provider.Message{{Role: "user", Parts: []provider.ContentPart{
+		{Type: "image_url", ImageURL: &provider.ImageURL{URL: uri}},
+		{Type: "image_url", ImageURL: &provider.ImageURL{URL: uri}},
+	}}}
+	got, err := extractImageDataURIs(context.Background(), messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != uri || got[1] != uri {
+		t.Fatalf("expected both images to be retained; got %d", len(got))
+	}
+}
+
+func TestExtractImageDataURIsRejectsInvalidAndUnfetchableImages(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{name: "invalid data URI", url: "data:image/png;base64,not-base64!"},
+		{name: "local URL", url: "http://127.0.0.1/image.png"},
+		{name: "unsupported scheme", url: "file:///tmp/image.png"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			messages := []provider.Message{{Role: "user", Parts: []provider.ContentPart{{
+				Type: "image_url", ImageURL: &provider.ImageURL{URL: tc.url},
+			}}}}
+			if got, err := extractImageDataURIs(context.Background(), messages); err == nil || got != nil {
+				t.Fatalf("expected image processing error; images=%d err=%v", len(got), err)
+			}
+		})
+	}
+}
+
+func TestFetchImageAsDataURIOverHTTPS(t *testing.T) {
+	image := append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte{0}, 32)...)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(image)
+	}))
+	defer server.Close()
+	if _, err := fetchImageAsDataURI(context.Background(), server.URL); err == nil {
+		t.Fatal("expected local HTTPS image host to be rejected")
+	}
+}
 
 func TestTokenValidation(t *testing.T) {
 	if IsTokenValid("not-a-token", 1) {

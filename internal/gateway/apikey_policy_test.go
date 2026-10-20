@@ -69,12 +69,7 @@ func TestAPIKeyScopeExpiryRateAndMutations(t *testing.T) {
 		}
 		_ = r.Body.Close()
 	}
-	r := do("GET", "/v1/models", nil, data.Key, false)
-	if r.StatusCode != 429 {
-		t.Fatalf("rate limit status %d", r.StatusCode)
-	}
-	_ = r.Body.Close()
-	r = do("POST", "/v1/chat/completions", nil, data.Key, false)
+	r := do("POST", "/v1/chat/completions", nil, data.Key, false)
 	if r.StatusCode != 403 {
 		t.Fatalf("scope status %d", r.StatusCode)
 	}
@@ -90,8 +85,8 @@ func TestAPIKeyScopeExpiryRateAndMutations(t *testing.T) {
 	}
 	_ = r.Body.Close()
 	r = do("GET", "/v1/models", nil, "", false)
-	if r.StatusCode != 401 {
-		t.Fatalf("empty key after revoke should fail closed: %d", r.StatusCode)
+	if r.StatusCode != 200 {
+		t.Fatalf("models list after revoke should remain public: %d", r.StatusCode)
 	}
 	_ = r.Body.Close()
 	r = do("POST", "/admin/api/apikeys/activate/"+data.Metadata.ID, nil, "", true)
@@ -103,8 +98,8 @@ func TestAPIKeyScopeExpiryRateAndMutations(t *testing.T) {
 		t.Fatal(err)
 	}
 	r = do("GET", "/v1/models", nil, data.Key, false)
-	if r.StatusCode != 401 {
-		t.Fatalf("expiry status %d", r.StatusCode)
+	if r.StatusCode != 200 {
+		t.Fatalf("models list after expiry should remain public: %d", r.StatusCode)
 	}
 	_ = r.Body.Close()
 	r = do("POST", "/admin/api/apikeys/activate/"+data.Metadata.ID, nil, "", true)
@@ -112,4 +107,34 @@ func TestAPIKeyScopeExpiryRateAndMutations(t *testing.T) {
 		t.Fatalf("expired activation status %d", r.StatusCode)
 	}
 	_ = r.Body.Close()
+}
+
+func TestModelsListRemainsPublicWhenAPIKeysExist(t *testing.T) {
+	db := setupTestDBForGateway(t)
+	keys := admin.NewAPIKeys(db)
+	if _, _, err := keys.Create("existing-client-key"); err != nil {
+		t.Fatal(err)
+	}
+	h := NewHandler(nil, scheduler.NewModelRegistry())
+	h.SetAPIKeys(keys)
+	srv := httptest.NewServer(NewRouter(h, ""))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/v1/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("models list status=%d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	chat, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{"model":"missing","messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer chat.Body.Close()
+	if chat.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("chat without key status=%d, want %d", chat.StatusCode, http.StatusUnauthorized)
+	}
 }

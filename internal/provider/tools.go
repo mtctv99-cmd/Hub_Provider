@@ -39,9 +39,11 @@ func ParseToolCalls(text string) (string, []ToolCall) {
 		if err := json.Unmarshal([]byte(rawBlock), &single); err == nil {
 			name, args := extractNameAndArgs(single)
 			if name != "" {
+				idx := len(calls)
 				calls = append(calls, ToolCall{
-					ID:   fmt.Sprintf("call_%d_%s", i, name),
-					Type: "function",
+					Index: &idx,
+					ID:    fmt.Sprintf("call_%d_%s", i, name),
+					Type:  "function",
 					Function: FunctionCallDesc{
 						Name:      name,
 						Arguments: args,
@@ -57,9 +59,11 @@ func ParseToolCalls(text string) (string, []ToolCall) {
 			for j, item := range list {
 				name, args := extractNameAndArgs(item)
 				if name != "" {
+					idx := len(calls)
 					calls = append(calls, ToolCall{
-						ID:   fmt.Sprintf("call_%d_%d_%s", i, j, name),
-						Type: "function",
+						Index: &idx,
+						ID:    fmt.Sprintf("call_%d_%d_%s", i, j, name),
+						Type:  "function",
 						Function: FunctionCallDesc{
 							Name:      name,
 							Arguments: args,

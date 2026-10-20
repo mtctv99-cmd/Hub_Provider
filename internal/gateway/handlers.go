@@ -539,6 +539,12 @@ func (h *Handler) streamChat(w http.ResponseWriter, ctx context.Context, req pro
 				firstToken = false
 			}
 			if len(chunk.ToolCalls) > 0 {
+				for i := range chunk.ToolCalls {
+					if chunk.ToolCalls[i].Index == nil {
+						idx := len(streamToolCalls) + i
+						chunk.ToolCalls[i].Index = &idx
+					}
+				}
 				streamToolCalls = append(streamToolCalls, chunk.ToolCalls...)
 			}
 			if chunk.Usage != nil {

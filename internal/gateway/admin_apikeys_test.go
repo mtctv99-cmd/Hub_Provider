@@ -200,10 +200,10 @@ func TestAPIKeyMiddlewareAndEndpoints(t *testing.T) {
 		t.Fatalf("expected 1 key in list, got %+v", listRes.Keys)
 	}
 
-	// 5. Now that active SQLite API key exists, request to protected /v1/models without auth should fail
+	// 5. The model catalog stays public after an API key has been provisioned.
 	resp, err = http.Get(ts.URL + "/v1/models")
-	if err != nil || resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("expected 401 Unauthorized when active key exists without auth header, got %d", resp.StatusCode)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected public model catalog after key creation, got %v (%d)", err, resp.StatusCode)
 	}
 
 	// 6. Request to /v1/models with the newly created key should succeed
@@ -220,12 +220,12 @@ func TestAPIKeyMiddlewareAndEndpoints(t *testing.T) {
 		t.Fatalf("expected 200 OK from revoke, got %d", resp.StatusCode)
 	}
 
-	// 8. Request with revoked key should now fail
+	// 8. Model discovery ignores a supplied key after it has been revoked.
 	req, _ = http.NewRequest(http.MethodGet, ts.URL+"/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer "+created.Key)
 	resp, err = http.DefaultClient.Do(req)
-	if err != nil || resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("expected 401 Unauthorized with revoked API key, got %d", resp.StatusCode)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected public model catalog with revoked API key, got %v (%d)", err, resp.StatusCode)
 	}
 
 	// 9. Delete the API key

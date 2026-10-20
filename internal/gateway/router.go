@@ -199,6 +199,7 @@ func withMiddleware(next http.Handler, h *Handler, apiKey string, dbKeys *admin.
 			!strings.HasPrefix(p, "/web/") &&
 			!strings.HasPrefix(p, "/web") &&
 			!strings.HasPrefix(p, "/models/") &&
+			p != "/v1/models" &&
 			p != "/health" &&
 			p != "/ready" &&
 			p != "/" &&
@@ -208,6 +209,9 @@ func withMiddleware(next http.Handler, h *Handler, apiKey string, dbKeys *admin.
 			candidate := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 			if candidate == "" {
 				candidate = strings.TrimSpace(r.Header.Get("X-API-Key"))
+			}
+			if p == "/v1/models" {
+				candidate = ""
 			}
 
 			if apiKey != "" && candidate == apiKey {

@@ -48,6 +48,7 @@ func (a *Account) UnmarshalJSON(data []byte) error {
 	}
 	return nil
 }
+
 type Session struct {
 	ConversationID            string
 	ChatSessionID             string
@@ -60,13 +61,14 @@ type Adapter struct {
 	HTTPClient *http.Client
 	Template   map[string]any
 	Origin     string
+	UploadURL  string
 }
 
 func New(template map[string]any) *Adapter {
 	if template == nil {
 		template = DefaultTemplate()
 	}
-	return &Adapter{HTTPClient: &http.Client{Timeout: 60 * time.Second}, Template: template, Origin: "https://m365.cloud.microsoft"}
+	return &Adapter{HTTPClient: &http.Client{Timeout: 60 * time.Second}, Template: template, Origin: "https://m365.cloud.microsoft", UploadURL: "https://substrate.office.com/m365Copilot/UploadFile"}
 }
 
 func DefaultTemplate() map[string]any {
@@ -130,8 +132,8 @@ func DefaultTemplate() map[string]any {
 					"SwitchRespondingEndpoint",
 				},
 				"clientInfo": map[string]any{
-					"ProductCategory":        "Chat",
-					"clientAppName":          "Office",
+					"ProductCategory":       "Chat",
+					"clientAppName":         "Office",
 					"clientAppType":         "Web",
 					"clientEntrypoint":      "mcmcopilot-officeweb",
 					"clientPlatform":        "mcmcopilot-web",
@@ -239,8 +241,11 @@ func (a *Adapter) Chat(ctx context.Context, req provider.ChatRequest, credential
 	}
 	sess := sessionFromUpstream(req.Upstream)
 	prompt := provider.FormatPromptWithTools(req.Messages, req.Tools, req.ToolChoice)
-	imageDataURI := extractImageDataURI(ctx, req.Messages)
-	full, err := a.generate(ctx, account, &sess, prompt, req.Model, imageDataURI, nil)
+	images, err := extractImageDataURIs(ctx, req.Messages)
+	if err != nil {
+		return provider.ChatResponse{}, err
+	}
+	full, err := a.generate(ctx, account, &sess, prompt, req.Model, images, nil)
 	if err != nil {
 		return provider.ChatResponse{}, err
 	}
@@ -273,14 +278,17 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, cred
 	}
 	sess := sessionFromUpstream(req.Upstream)
 	prompt := provider.FormatPromptWithTools(req.Messages, req.Tools, req.ToolChoice)
-	imageDataURI := extractImageDataURI(ctx, req.Messages)
+	images, err := extractImageDataURIs(ctx, req.Messages)
+	if err != nil {
+		return nil, err
+	}
 	out := make(chan provider.StreamChunk, 16)
 	hasTools := len(req.Tools) > 0 && req.ToolChoice != "none"
 
 	go func() {
 		defer close(out)
 		if !hasTools {
-			_, err := a.generate(ctx, account, &sess, prompt, req.Model, imageDataURI, func(delta string) {
+			_, err := a.generate(ctx, account, &sess, prompt, req.Model, images, func(delta string) {
 				select {
 				case out <- provider.StreamChunk{Content: delta}:
 				case <-ctx.Done():
@@ -296,7 +304,7 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, cred
 
 		// Tool calling mode: buffer stream to parse tool call blocks cleanly
 		var buf strings.Builder
-		_, err := a.generate(ctx, account, &sess, prompt, req.Model, imageDataURI, func(delta string) {
+		_, err := a.generate(ctx, account, &sess, prompt, req.Model, images, func(delta string) {
 			buf.WriteString(delta)
 		})
 		if err != nil {
@@ -329,32 +337,71 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, cred
 	return out, nil
 }
 
-func extractImageDataURI(ctx context.Context, messages []provider.Message) string {
+func extractImageDataURIs(ctx context.Context, messages []provider.Message) ([]string, error) {
+	var images []string
 	for _, m := range messages {
 		for _, p := range m.Parts {
 			if p.Type == "image_url" && p.ImageURL != nil && p.ImageURL.URL != "" {
 				raw := strings.TrimSpace(p.ImageURL.URL)
 				if strings.HasPrefix(raw, "data:image/") {
-					return raw
+					if _, err := decodeImageDataURI(raw); err != nil {
+						return nil, fmt.Errorf("copilot vision: %w", err)
+					}
+					images = append(images, raw)
+					continue
 				}
 				if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
 					dataURI, err := fetchImageAsDataURI(ctx, raw)
-					if err == nil && dataURI != "" {
-						return dataURI
+					if err != nil {
+						return nil, fmt.Errorf("copilot vision: unable to fetch image: %w", err)
 					}
+					images = append(images, dataURI)
+					continue
 				}
+				return nil, errors.New("copilot vision: image URL must be an image data URI or public HTTPS URL")
 			}
 		}
 	}
-	return ""
+	return images, nil
+}
+
+const maxInputImageBytes = 16 * 1024 * 1024
+
+func decodeImageDataURI(raw string) ([]byte, error) {
+	parts := strings.SplitN(raw, ",", 2)
+	if len(parts) != 2 || !strings.HasPrefix(strings.ToLower(parts[0]), "data:image/") || !strings.HasSuffix(strings.ToLower(parts[0]), ";base64") {
+		return nil, errors.New("image data must be a base64 image data URI")
+	}
+	data, err := base64.StdEncoding.DecodeString(parts[1])
+	if err != nil || len(data) == 0 {
+		return nil, errors.New("image data URI contains invalid or empty base64 data")
+	}
+	if len(data) > maxInputImageBytes {
+		return nil, errors.New("image exceeds maximum size")
+	}
+	if !strings.HasPrefix(http.DetectContentType(data), "image/") {
+		return nil, errors.New("image data URI payload is not an image")
+	}
+	return data, nil
 }
 
 func fetchImageAsDataURI(ctx context.Context, rawURL string) (string, error) {
+	if err := validateImageURL(rawURL); err != nil {
+		return "", err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return "", err
 	}
-	client := &http.Client{Timeout: 15 * time.Second}
+	transport := imageTransport()
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Timeout: 30 * time.Second, Transport: transport}
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 4 {
+			return errors.New("image redirect limit exceeded")
+		}
+		return validateImageURL(req.URL.String())
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
@@ -363,25 +410,38 @@ func fetchImageAsDataURI(ctx context.Context, rawURL string) (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("fetch image HTTP %d", resp.StatusCode)
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 16*1024*1024))
-	if err != nil || len(data) == 0 {
+	if resp.ContentLength > maxInputImageBytes {
+		return "", errors.New("image exceeds maximum size")
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxInputImageBytes+1))
+	if err != nil {
 		return "", fmt.Errorf("read image bytes failed: %w", err)
 	}
-	mime := resp.Header.Get("Content-Type")
-	if mime == "" || !strings.HasPrefix(mime, "image/") {
+	if len(data) == 0 || len(data) > maxInputImageBytes {
+		return "", errors.New("image is empty or exceeds maximum size")
+	}
+	mime := strings.ToLower(strings.TrimSpace(strings.Split(resp.Header.Get("Content-Type"), ";")[0]))
+	if !strings.HasPrefix(mime, "image/") {
 		mime = http.DetectContentType(data)
+	}
+	if !strings.HasPrefix(mime, "image/") || !strings.HasPrefix(http.DetectContentType(data), "image/") {
+		return "", errors.New("image URL response is not an image")
 	}
 	b64 := base64.StdEncoding.EncodeToString(data)
 	return fmt.Sprintf("data:%s;base64,%s", mime, b64), nil
 }
 
-func (a *Adapter) generate(ctx context.Context, account Account, sess *Session, text, model, imageDataURI string, onDelta func(string)) (string, error) {
+func (a *Adapter) generate(ctx context.Context, account Account, sess *Session, text, model string, imageDataURIs []string, onDelta func(string)) (string, error) {
 	wsURL, convID, chatID, err := BuildInvocationURL(account.TokenURL, sess)
 	if err != nil {
 		return "", err
 	}
 	if sess != nil {
 		sess.ConversationID, sess.ChatSessionID = convID, chatID
+	}
+	annotations, err := a.uploadImages(ctx, account.TokenURL, convID, imageDataURIs)
+	if err != nil {
+		return "", err
 	}
 	payload := cloneMap(a.Template)
 	if payload == nil {
@@ -419,9 +479,8 @@ func (a *Adapter) generate(ctx context.Context, account Account, sess *Session, 
 	if message, ok := arg0["message"].(map[string]any); ok {
 		message["text"] = text
 		message["requestId"] = reqID
-		if imageDataURI != "" {
-			message["imageUrl"] = imageDataURI
-			message["originalImageUrl"] = imageDataURI
+		if len(annotations) > 0 {
+			message["messageAnnotations"] = annotations
 		}
 	}
 

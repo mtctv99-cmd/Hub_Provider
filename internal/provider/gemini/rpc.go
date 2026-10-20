@@ -70,6 +70,9 @@ func (a *Adapter) Chat(ctx context.Context, req provider.ChatRequest, secret []b
 		if len(toolCalls) > 0 {
 			finishReason = "tool_calls"
 		}
+		if len(toolCalls) == 0 && provider.ToolChoiceRequiresCall(req.ToolChoice) {
+			return provider.ChatResponse{}, fmt.Errorf("gemini: tool_choice requires a tool call but the model returned none")
+		}
 	}
 	if strings.TrimSpace(cleanText) == "" && len(toolCalls) == 0 {
 		return provider.ChatResponse{}, provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, "gemini chat returned empty content with no tool calls")
@@ -172,6 +175,7 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, secr
 	}
 
 	ch := make(chan provider.StreamChunk, 16)
+	hasTools := len(req.Tools) > 0 && req.ToolChoice != "none"
 	go func() {
 		defer close(ch)
 		defer resp.Body.Close()
@@ -201,7 +205,7 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, secr
 						if strings.TrimSpace(text) != "" {
 							sawValidEnd = true
 						}
-						if delta != "" {
+						if delta != "" && !hasTools {
 							select {
 							case <-ctx.Done():
 								ch <- provider.StreamChunk{Err: ctx.Err()}
@@ -238,13 +242,27 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, secr
 		}
 		finishReason := "stop"
 		var toolCalls []provider.ToolCall
-		if len(req.Tools) > 0 && req.ToolChoice != "none" {
-			_, toolCalls = ParseToolCalls(prevText)
+		finalText := prevText
+		if hasTools {
+			var cleanText string
+			cleanText, toolCalls = ParseToolCalls(prevText)
+			finalText = cleanText
 			if len(toolCalls) > 0 {
 				finishReason = "tool_calls"
+			} else if provider.ToolChoiceRequiresCall(req.ToolChoice) {
+				ch <- provider.StreamChunk{Err: fmt.Errorf("gemini: tool_choice requires a tool call but the model returned none")}
+				return
+			}
+			if strings.TrimSpace(cleanText) != "" {
+				select {
+				case <-ctx.Done():
+					ch <- provider.StreamChunk{Err: ctx.Err()}
+					return
+				case ch <- provider.StreamChunk{Content: cleanText}:
+				}
 			}
 		}
-		if strings.TrimSpace(prevText) == "" && len(toolCalls) == 0 {
+		if strings.TrimSpace(finalText) == "" && len(toolCalls) == 0 {
 			if !sawValidLine {
 				ch <- provider.StreamChunk{Err: provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, "gemini stream ended without valid response frames")}
 			} else {

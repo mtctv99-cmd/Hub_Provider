@@ -36,6 +36,11 @@ func TestParseToolCalls_Multiple(t *testing.T) {
 	if calls[0].Function.Name != "read_file" || calls[1].Function.Name != "read_file" {
 		t.Errorf("unexpected call names: %v, %v", calls[0].Function.Name, calls[1].Function.Name)
 	}
+	for i, call := range calls {
+		if call.Index == nil || *call.Index != i {
+			t.Errorf("call %d missing or wrong stream index: %v", i, call.Index)
+		}
+	}
 	if clean != "" {
 		t.Errorf("expected empty clean text, got: %q", clean)
 	}
@@ -139,5 +144,20 @@ func TestFormatPromptWithTools_MultiTurn(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "Vậy có mưa không?") {
 		t.Errorf("prompt missing final user message")
+	}
+}
+
+func TestToolChoiceRequiresCall(t *testing.T) {
+	if !ToolChoiceRequiresCall("required") {
+		t.Errorf("expected true for required string")
+	}
+	if !ToolChoiceRequiresCall("REQUIRED") {
+		t.Errorf("expected case-insensitive true for required")
+	}
+	if !ToolChoiceRequiresCall(map[string]any{"function": map[string]any{"name": "test"}}) {
+		t.Errorf("expected true for function map")
+	}
+	if ToolChoiceRequiresCall("auto") || ToolChoiceRequiresCall("none") || ToolChoiceRequiresCall(nil) {
+		t.Errorf("expected false for auto/none/nil")
 	}
 }

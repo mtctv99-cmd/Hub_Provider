@@ -18,6 +18,7 @@ type webModelConfig struct {
 
 var webModels = map[string]webModelConfig{
 	"gemini-3.8-flash":      {hex: "56fdd199312815e2", mode: 1},
+	"gemini-3.6-flash":      {hex: "56fdd199312815e2", mode: 1},
 	"gemini-3.5-flash-lite": {hex: "cf41b0e0dd7d53e5", mode: 6},
 	"gemini-3.1-pro":        {hex: "9d8ca3786ebdfbea", mode: 3},
 	"gemini-4-argon":        {hex: "95a4c0abcba24364", mode: 8},
@@ -173,11 +174,11 @@ func resolveThinkingModel(model, effort string) (string, string, error) {
 // through this reverse-engineered web endpoint.
 func thinkingLevel(effort string) (int, error) {
 	switch strings.ToLower(strings.TrimSpace(effort)) {
-	case "", "low", "medium":
+	case "", "minimal", "low", "medium":
 		return 1, nil
 	case "high":
 		return 2, nil
 	default:
-		return 0, fmt.Errorf("unsupported Gemini reasoning_effort %q; expected low, medium, or high", effort)
+		return 0, fmt.Errorf("unsupported Gemini reasoning_effort %q; expected minimal, low, medium, or high", effort)
 	}
 }

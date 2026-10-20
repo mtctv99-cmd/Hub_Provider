@@ -112,9 +112,25 @@ type Function struct {
 }
 
 type ToolCall struct {
+	// Index identifies the call within a streamed response. OpenAI SDKs require
+	// it on delta.tool_calls; omitempty keeps non-streaming payloads unchanged.
+	Index    *int             `json:"index,omitempty"`
 	ID       string           `json:"id"`
 	Type     string           `json:"type"`
 	Function FunctionCallDesc `json:"function"`
+}
+
+// ToolChoiceRequiresCall reports whether tool_choice forces at least one tool
+// call, so adapters can fail instead of silently answering in plain text.
+func ToolChoiceRequiresCall(choice any) bool {
+	switch v := choice.(type) {
+	case string:
+		return strings.EqualFold(strings.TrimSpace(v), "required")
+	case map[string]any:
+		_, ok := v["function"]
+		return ok
+	}
+	return false
 }
 
 type FunctionCallDesc struct {

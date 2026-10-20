@@ -190,3 +190,103 @@ func TestStreamDeadlineExplicit(t *testing.T) {
 		t.Fatalf("expected default 120s, got %v", d)
 	}
 }
+
+func TestStreamChat_ToolCallsBufferedAndIndexed(t *testing.T) {
+	line := func(text string) []byte {
+		inner := []any{"x", []any{"c_1", "r_1"}, nil, nil, []any{[]any{"rc_1", []any{text}}}}
+		j, _ := json.Marshal(inner)
+		l, _ := json.Marshal([]any{[]any{"wrb.fr", nil, string(j)}})
+		return append(l, '\n')
+	}
+	responseBody := "```tool_call\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Hanoi\"}}\n```"
+	srv := tokenHandlerRPC(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(line(responseBody[:15]))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		_, _ = w.Write(line(responseBody))
+	})
+	defer srv.Close()
+
+	a := New(&http.Client{})
+	a.SetBaseURL(srv.URL)
+	req := provider.ChatRequest{
+		Model: "gemini-3.8-flash",
+		Tools: []provider.Tool{
+			{Type: "function", Function: &provider.Function{Name: "get_weather"}},
+		},
+		ToolChoice: "auto",
+	}
+	ch, err := a.StreamChat(context.Background(), req, nil)
+	if err != nil {
+		t.Fatalf("StreamChat: %v", err)
+	}
+
+	var chunks []provider.StreamChunk
+	for c := range ch {
+		if c.Err != nil {
+			t.Fatalf("unexpected chunk err: %v", c.Err)
+		}
+		chunks = append(chunks, c)
+	}
+	if len(chunks) == 0 {
+		t.Fatal("expected at least one chunk")
+	}
+
+	// In tool-call mode, intermediate tool_call markdown must NOT be streamed to content
+	for _, c := range chunks {
+		if strings.Contains(c.Content, "tool_call") {
+			t.Fatalf("streamed chunk leaked raw tool_call fence: %q", c.Content)
+		}
+	}
+	last := chunks[len(chunks)-1]
+	if !last.Done {
+		t.Fatal("last chunk must be Done")
+	}
+	if len(last.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(last.ToolCalls))
+	}
+	tc := last.ToolCalls[0]
+	if tc.Index == nil || *tc.Index != 0 {
+		t.Fatalf("expected tool call index 0, got %v", tc.Index)
+	}
+	if tc.Function.Name != "get_weather" {
+		t.Fatalf("expected get_weather, got %s", tc.Function.Name)
+	}
+}
+
+func TestStreamChat_ToolChoiceRequiredFailsWhenNoCalls(t *testing.T) {
+	line := func(text string) []byte {
+		inner := []any{"x", []any{"c_1", "r_1"}, nil, nil, []any{[]any{"rc_1", []any{text}}}}
+		j, _ := json.Marshal(inner)
+		l, _ := json.Marshal([]any{[]any{"wrb.fr", nil, string(j)}})
+		return append(l, '\n')
+	}
+	srv := tokenHandlerRPC(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(line("Plain text answer without tool call."))
+	})
+	defer srv.Close()
+
+	a := New(&http.Client{})
+	a.SetBaseURL(srv.URL)
+	req := provider.ChatRequest{
+		Model: "gemini-3.8-flash",
+		Tools: []provider.Tool{
+			{Type: "function", Function: &provider.Function{Name: "get_weather"}},
+		},
+		ToolChoice: "required",
+	}
+	ch, err := a.StreamChat(context.Background(), req, nil)
+	if err != nil {
+		t.Fatalf("StreamChat: %v", err)
+	}
+	var errFound bool
+	for c := range ch {
+		if c.Err != nil {
+			errFound = true
+		}
+	}
+	if !errFound {
+		t.Fatal("expected error when required tool choice emitted no tool call")
+	}
+}

@@ -26,7 +26,8 @@ const (
 // extractor deliberately recognizes only candidate[12] image attachments, not
 // arbitrary URLs in the model's prose or other RPC fields.
 func (a *Adapter) Image(ctx context.Context, req provider.ImageRequest, secret []byte) (provider.ImageResponse, error) {
-	if req.Model != "gemini-3.8-flash" || strings.TrimSpace(req.Prompt) == "" || req.Size != "" {
+	m := modelName(req.Model)
+	if (m != "gemini-3.8-flash" && m != "gemini-3.6-flash") || strings.TrimSpace(req.Prompt) == "" || req.Size != "" {
 		return provider.ImageResponse{}, provider.ErrCapabilityUnsupported
 	}
 	var cred struct {

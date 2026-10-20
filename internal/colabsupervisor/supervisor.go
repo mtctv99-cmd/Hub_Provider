@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -159,19 +160,35 @@ func parseCooldownTime(raw any) (time.Time, bool) {
 		if s == "" {
 			return time.Time{}, false
 		}
-		for _, layout := range []string{
-			"2006-01-02 15:04:05.999999999-07:00",
-			"2006-01-02 15:04:05",
-			"2006-01-02T15:04:05Z07:00",
-			time.RFC3339Nano,
-			time.RFC3339,
-		} {
-			if t, err := time.Parse(layout, s); err == nil {
-				return t, true
+		// Strip Go String() monotonic suffix (" m=+123.456") written when a
+		// time.Time carrying a monotonic reading was stored directly.
+		if i := strings.Index(s, " m="); i >= 0 {
+			s = strings.TrimSpace(s[:i])
+		}
+		candidates := []string{s}
+		// Go String() form "2006-01-02 15:04:05.999 +0700 Zone": drop the
+		// trailing zone name, keep date + clock + numeric offset.
+		if f := strings.Fields(s); len(f) == 4 {
+			candidates = append(candidates, f[0]+" "+f[1]+f[2])
+		}
+		for _, c := range candidates {
+			for _, layout := range []string{
+				"2006-01-02 15:04:05.999999999-0700",
+				"2006-01-02 15:04:05-0700",
+				"2006-01-02 15:04:05.999999999-07:00",
+				"2006-01-02 15:04:05",
+				"2006-01-02T15:04:05Z07:00",
+				time.RFC3339Nano,
+				time.RFC3339,
+			} {
+				if t, err := time.Parse(layout, c); err == nil {
+					return t, true
+				}
 			}
 		}
-		var f float64
-		if _, err := fmt.Sscanf(s, "%f", &f); err == nil {
+		// Numeric-only fallback for unix-epoch encodings. ParseFloat needs a
+		// full-string match, so "2026-10-13..." can't slip through as 2026.
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
 			return unixSecondsToTime(f)
 		}
 		return time.Time{}, false
@@ -230,7 +247,7 @@ func (s *Supervisor) RecordCooldown(ctx context.Context, accountID string, durat
 		return nil
 	}
 	s.ensureIdentity(ctx, accountID)
-	until := time.Now().Add(duration)
+	until := time.Now().Add(duration).UTC().Truncate(time.Second).Format("2006-01-02 15:04:05")
 	rawName := strings.TrimPrefix(accountID, "colab-")
 	_, err := s.db.ExecContext(ctx, `
 			INSERT INTO account_cooldowns(identity_id, state, cooldown_until, updated_at)
