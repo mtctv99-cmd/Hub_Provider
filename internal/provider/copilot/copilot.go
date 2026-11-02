@@ -195,12 +195,21 @@ func IsTokenValid(tokenURL string, minSeconds int64) bool {
 	return err == nil
 }
 
+func extractUserOID(tokenPath string) string {
+	trimmed := strings.TrimPrefix(tokenPath, "/m365Copilot/Chathub/")
+	parts := strings.Split(trimmed, "@")
+	if len(parts) > 0 && parts[0] != "" {
+		return parts[0]
+	}
+	return ""
+}
+
 func BuildInvocationURL(tokenURL string, session *Session) (string, string, string, error) {
 	u, err := url.Parse(tokenURL)
 	if err != nil {
 		return "", "", "", err
 	}
-	conversationID, chatSessionID := randomUUID(), randomHex(16)
+	conversationID, chatSessionID := randomUUID(), randomUUID()
 	if session != nil {
 		if session.ConversationID != "" {
 			conversationID = session.ConversationID
@@ -209,15 +218,16 @@ func BuildInvocationURL(tokenURL string, session *Session) (string, string, stri
 			chatSessionID = session.ChatSessionID
 		}
 	}
-	xSession := chatSessionID
-	if len(chatSessionID) >= 32 {
-		xSession = chatSessionID[:8] + "-" + chatSessionID[8:12] + "-" + chatSessionID[12:16] + "-" + chatSessionID[16:20] + "-" + chatSessionID[20:32]
+	turnReqID := randomUUID()
+	userOID := extractUserOID(u.Path)
+	if userOID == "" {
+		userOID = chatSessionID
 	}
 	q := u.Query()
-	q.Set("chatsessionid", chatSessionID)
-	q.Set("XRoutingParameterSessionKey", chatSessionID)
-	q.Set("clientrequestid", chatSessionID)
-	q.Set("X-SessionId", xSession)
+	q.Set("chatsessionid", turnReqID)
+	q.Set("clientrequestid", turnReqID)
+	q.Set("XRoutingParameterSessionKey", userOID)
+	q.Set("X-SessionId", chatSessionID)
 	q.Set("ConversationId", conversationID)
 	u.RawQuery = q.Encode()
 	return u.String(), conversationID, chatSessionID, nil
@@ -447,7 +457,7 @@ func (a *Adapter) generate(ctx context.Context, account Account, sess *Session, 
 	if payload == nil {
 		return "", errors.New("copilot invocation template is required")
 	}
-	payload["invocationId"] = fmt.Sprintf("%d", sess.InvocationID)
+	payload["invocationId"] = "0"
 	args, ok := payload["arguments"].([]any)
 	if !ok || len(args) == 0 {
 		return "", errors.New("copilot template arguments missing")
@@ -464,15 +474,11 @@ func (a *Adapter) generate(ctx context.Context, account Account, sess *Session, 
 	arg0["requestId"] = reqID
 	arg0["traceId"] = traceID
 	arg0["tone"] = mapTone(model)
-	arg0["isStartOfSession"] = sess.InvocationID == 0
-	arg0["conversationId"] = convID
+	arg0["isStartOfSession"] = false
 	arg0["sessionId"] = chatID
-	if sess.ConversationTransferToken != "" {
-		arg0["conversationTransferToken"] = sess.ConversationTransferToken
-	}
-	if sess.TurnState != "" {
-		arg0["turnState"] = sess.TurnState
-	}
+	delete(arg0, "conversationId")
+	delete(arg0, "conversationTransferToken")
+	delete(arg0, "turnState")
 	if clientInfo, ok := arg0["clientInfo"].(map[string]any); ok {
 		clientInfo["clientSessionId"] = chatID
 	}
@@ -727,12 +733,20 @@ func formatMessages(messages []provider.Message) string {
 	return b.String()
 }
 
+// sessionFromUpstream preserves upstream ConversationID and ChatSessionID so
+// subsequent turns reuse the same upstream conversation.
 func sessionFromUpstream(upstream provider.UpstreamState) Session {
-	return Session{ConversationID: upstream.ConversationID, ChatSessionID: upstream.ChatSessionID, InvocationID: upstream.InvocationID, ConversationTransferToken: upstream.ConversationTransferToken, TurnState: upstream.TurnState}
+	return Session{
+		ConversationID: upstream.ConversationID,
+		ChatSessionID:  upstream.ChatSessionID,
+	}
 }
 
 func upstreamFromSession(sess Session) provider.UpstreamState {
-	return provider.UpstreamState{ConversationID: sess.ConversationID, ChatSessionID: sess.ChatSessionID, InvocationID: sess.InvocationID, ConversationTransferToken: sess.ConversationTransferToken, TurnState: sess.TurnState}
+	return provider.UpstreamState{
+		ConversationID: sess.ConversationID,
+		ChatSessionID:  sess.ChatSessionID,
+	}
 }
 
 // terminalResult reads the type-2 completion status. Missing result on an

@@ -50,22 +50,19 @@ func TestTerminalSuccessEmptyRejected(t *testing.T) {
 	}
 }
 
-// Continuation state round-trip: transferToken/turnState không mất.
-func TestUpstreamContinuationRoundTrip(t *testing.T) {
+// Copilot upstream supports continuation when ConversationID and ChatSessionID
+// are preserved while request IDs are regenerated.
+func TestUpstreamContinuationEnabled(t *testing.T) {
 	up := provider.UpstreamState{
-		ConversationID: "c", ChatSessionID: "s", InvocationID: 2,
-		ConversationTransferToken: "tok123", TurnState: `{"turn":1}`,
+		ConversationID: "c123", ChatSessionID: "s456",
 	}
 	sess := sessionFromUpstream(up)
-	if sess.ConversationTransferToken != "tok123" || sess.TurnState != `{"turn":1}` {
-		t.Fatalf("session=%+v", sess)
+	if sess.ConversationID != "c123" || sess.ChatSessionID != "s456" {
+		t.Fatalf("session must preserve upstream IDs, got %+v", sess)
 	}
 	back := upstreamFromSession(sess)
-	if back.ConversationTransferToken != "tok123" || back.TurnState != `{"turn":1}` {
-		t.Fatalf("upstream=%+v", back)
-	}
-	if back.Empty() {
-		t.Fatal("continuation state must not be empty")
+	if back.ConversationID != "c123" || back.ChatSessionID != "s456" {
+		t.Fatalf("upstream state mismatch: %+v", back)
 	}
 }
 

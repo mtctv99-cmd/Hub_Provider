@@ -12,13 +12,14 @@ import (
 const geminiPayloadSlots = 97
 
 type webModelConfig struct {
-	hex  string
-	mode int
+	hex   string
+	mode  int
+	image bool
 }
 
 var webModels = map[string]webModelConfig{
-	"gemini-3.8-flash":      {hex: "56fdd199312815e2", mode: 1},
-	"gemini-3.6-flash":      {hex: "56fdd199312815e2", mode: 1},
+	"gemini-3.8-flash":      {hex: "56fdd199312815e2", mode: 1, image: true},
+	"gemini-3.6-flash":      {hex: "56fdd199312815e2", mode: 1, image: true},
 	"gemini-3.5-flash-lite": {hex: "cf41b0e0dd7d53e5", mode: 6},
 	"gemini-3.1-pro":        {hex: "9d8ca3786ebdfbea", mode: 3},
 	"gemini-4-argon":        {hex: "95a4c0abcba24364", mode: 8},
@@ -28,6 +29,11 @@ type ConversationMetadata struct {
 	ConversationID string
 	ResponseID     string
 	ChoiceID       string
+}
+
+// Empty reports whether the upstream returned no conversation identifiers.
+func (m ConversationMetadata) Empty() bool {
+	return m.ConversationID == "" && m.ResponseID == "" && m.ChoiceID == ""
 }
 
 type UploadedFile struct {

@@ -29,6 +29,11 @@ venv/
 .zcode/
 .playwright/
 .playwright-mcp/
+.v2c/
+
+# Logs and Benchmark Dumps
+*.log
+bench_*.json
 
 # Secrets and provider session material
 .env

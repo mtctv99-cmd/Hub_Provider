@@ -7,14 +7,22 @@ from pathlib import Path
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from playwright.sync_api import sync_playwright
 
-ACCOUNTS = [
-    ("copilot@maika2611.onmicrosoft.com", "H(495416680947uk"),
-    ("copilot022@maika2611.onmicrosoft.com", "B(097700442140oq"),
-    ("it1@8883t3.onmicrosoft.com", "N%728081950128aj"),
-    ("tiktoktts1@maika2611.onmicrosoft.com", "W*185728548592ol"),
-    ("tiktoktts2@maika2611.onmicrosoft.com", "R%619174403172up"),
-    ("tiktoktts3@maika2611.onmicrosoft.com", "N$244697822285op"),
-]
+# Tài khoản lấy từ biến môi trường hoặc file .env.copilot, không hardcode mật khẩu trong git repo.
+# Cách dùng:
+#   COPILOT_ACCOUNTS_JSON='[["email1","pass1"],["email2","pass2"]]' python3 auto_copilot_login.py
+raw = os.environ.get("COPILOT_ACCOUNTS_JSON", "")
+if not raw and os.path.exists(".env.copilot"):
+    try:
+        raw = open(".env.copilot", encoding="utf-8").read().strip()
+    except Exception:
+        pass
+if not raw:
+    raw = "[]"
+try:
+    ACCOUNTS = [(a[0], a[1]) for a in json.loads(raw)]
+except Exception:
+    print("COPILOT_ACCOUNTS_JSON không hợp lệ, kỳ vọng mảng [[email, password], ...].")
+    sys.exit(1)
 
 DB_PATH = "/media/reup/Data_sv4/Sever_provider/data/orchestrator.db"
 MASTER_KEY = bytes.fromhex("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")

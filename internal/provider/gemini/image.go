@@ -26,8 +26,10 @@ const (
 // extractor deliberately recognizes only candidate[12] image attachments, not
 // arbitrary URLs in the model's prose or other RPC fields.
 func (a *Adapter) Image(ctx context.Context, req provider.ImageRequest, secret []byte) (provider.ImageResponse, error) {
-	m := modelName(req.Model)
-	if (m != "gemini-3.8-flash" && m != "gemini-3.6-flash") || strings.TrimSpace(req.Prompt) == "" || req.Size != "" {
+	if strings.TrimSpace(req.Prompt) == "" || req.Size != "" {
+		return provider.ImageResponse{}, provider.ErrCapabilityUnsupported
+	}
+	if config, ok := webModels[modelName(req.Model)]; !ok || !config.image {
 		return provider.ImageResponse{}, provider.ErrCapabilityUnsupported
 	}
 	var cred struct {
@@ -42,7 +44,8 @@ func (a *Adapter) Image(ctx context.Context, req provider.ImageRequest, secret [
 	}
 	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
-	raw, err := a.generateImageRaw(ctx, "Generate an image of: "+req.Prompt, req.Model, cookie)
+	metadata := ConversationMetadata{ConversationID: req.Upstream.ConversationID, ResponseID: req.Upstream.ResponseID, ChoiceID: req.Upstream.ChoiceID}
+	raw, err := a.generateImageRaw(ctx, "Generate an image of: "+req.Prompt, req.Model, cookie, metadata)
 	if err != nil {
 		return provider.ImageResponse{}, err
 	}
@@ -50,16 +53,25 @@ func (a *Adapter) Image(ctx context.Context, req provider.ImageRequest, secret [
 	if err != nil {
 		return provider.ImageResponse{}, err
 	}
+	// Same style next turn: hand the conversation IDs back so the dispatcher can
+	// persist them for this session.
+	turn := provider.UpstreamState{}
+	if meta := ExtractConversationMetadata(raw); !meta.Empty() {
+		turn = provider.UpstreamState{ConversationID: meta.ConversationID, ResponseID: meta.ResponseID, ChoiceID: meta.ChoiceID}
+	}
 	if resp, dlErr := a.downloadGeneratedImageWithCookie(ctx, imageURL, "", false); dlErr == nil {
+		resp.Upstream = turn
 		return resp, nil
 	}
 	// ponytail: CDN lh3.googleusercontent.com thường 403 khi thiếu Cookie/Referer.
 	// Retry 1 lần kèm cookie phiên (không gửi Authorization) vì URL gg-dl là
 	// signed URL gắn phiên, không phải asset public.
-	return a.downloadGeneratedImageWithCookie(ctx, imageURL, cookie, true)
+	resp, dlErr := a.downloadGeneratedImageWithCookie(ctx, imageURL, cookie, true)
+	resp.Upstream = turn
+	return resp, dlErr
 }
 
-func (a *Adapter) generateImageRaw(ctx context.Context, prompt, model, cookie string) (string, error) {
+func (a *Adapter) generateImageRaw(ctx context.Context, prompt, model, cookie string, metadata ConversationMetadata) (string, error) {
 	a.syncTokenBaseURL()
 	tokens, err := a.Tokens.Get(ctx, cookie)
 	if err != nil {
@@ -68,7 +80,7 @@ func (a *Adapter) generateImageRaw(ctx context.Context, prompt, model, cookie st
 	if tokens.XSRF == "" {
 		return "", fmt.Errorf("gemini page did not expose XSRF token")
 	}
-	body := BuildPayload(prompt, model, tokens.XSRF, "", ConversationMetadata{}, nil)
+	body := BuildPayload(prompt, modelName(model), tokens.XSRF, "", metadata, nil)
 	u, _ := url.Parse(a.BaseURL + "/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate")
 	q := u.Query()
 	q.Set("bl", tokens.BL)
@@ -86,7 +98,11 @@ func (a *Adapter) generateImageRaw(ctx context.Context, prompt, model, cookie st
 	for key, value := range headers(cookie, SapisidFromCookie(cookie), time.Now()) {
 		req.Header[key] = value
 	}
-	req.Header.Set("x-goog-ext-525001261-jspb", imageRPCHeader())
+	header, err := imageRPCHeader(model)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("x-goog-ext-525001261-jspb", header)
 	resp, err := a.Client.Do(req)
 	if err != nil {
 		return "", err
@@ -109,9 +125,26 @@ func (a *Adapter) Video(context.Context, provider.VideoRequest, []byte) (provide
 	return provider.VideoResponse{}, provider.ErrCapabilityUnsupported
 }
 
-func imageRPCHeader() string {
-	// Mode 10 bật Imagen trong StreamGenerate RPC, tách khỏi header chat text 71c2d248d3b102ff.
-	return `[1,null,null,null,"56fdd199312815e2",null,null,0,[4,5,6,8,4,5,6,8],null,null,2,null,null,1,1,"37148B01-D513-431C-B2FD-18F42A6EFE22"]`
+// imageRPCHeader builds the Mode-10 Imagen header from the model registry.
+// Models without image support are rejected instead of silently using a text header.
+func imageRPCHeader(model string) (string, error) {
+	config, ok := webModels[modelName(model)]
+	if !ok || !config.image {
+		return "", provider.ErrCapabilityUnsupported
+	}
+	// Mode 10 bật Imagen trong StreamGenerate RPC, tách khỏi header chat text.
+	// ponytail: fixed mode-10 field layout; a new image mode needs its own builder.
+	fields := make([]any, 17)
+	fields[0] = 1
+	fields[4] = config.hex
+	fields[7] = 0
+	fields[8] = []int{4, 5, 6, 8, 4, 5, 6, 8}
+	fields[11] = 2
+	fields[14] = 1
+	fields[15] = 1
+	fields[16] = "37148B01-D513-431C-B2FD-18F42A6EFE22"
+	b, err := json.Marshal(fields)
+	return string(b), err
 }
 
 func generatedImageURL(raw string) (string, bool) {

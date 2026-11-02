@@ -3,10 +3,28 @@ package gemini
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"sever_provider/internal/provider"
 )
+
+var (
+	// imageGenerationMarker matches the text token Gemini emits next to a
+	// generated image. It can be URI-escaped inside JSON payloads.
+	imageGenerationMarker = regexp.MustCompile(`https?:(?:\\?/){2}googleusercontent\.com/image_generation_content/[^\s"'\\]+`)
+	imageTagMarker        = regexp.MustCompile(`<Image[^>]*>`)
+)
+
+// hasImageGenerationMarker reports whether a raw Gemini RPC payload carries
+// generated-image content (text marker, <Image/> tag, or candidate[12] attachment).
+func hasImageGenerationMarker(raw string) bool {
+	if imageGenerationMarker.MatchString(raw) || imageTagMarker.MatchString(raw) {
+		return true
+	}
+	_, err := extractGeneratedImageURL(raw)
+	return err == nil
+}
 
 // DiagnoseEmptyResponse builds an empty_response error that distinguishes an
 // upstream that produced no text from a payload the parser could not extract.
@@ -238,5 +256,7 @@ func cleanText(value string) string {
 		value = value[:idx]
 	}
 	value = strings.ReplaceAll(value, "http://googleusercontent.com/card_content/", "")
+	value = imageGenerationMarker.ReplaceAllString(value, "")
+	value = imageTagMarker.ReplaceAllString(value, "")
 	return strings.TrimSpace(value)
 }

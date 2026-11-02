@@ -20,6 +20,7 @@ import (
 	"sever_provider/internal/buildinfo"
 	"sever_provider/internal/colabsupervisor"
 	"sever_provider/internal/config"
+	"sever_provider/internal/copilotrefresh"
 	"sever_provider/internal/db"
 	"sever_provider/internal/filestore"
 	"sever_provider/internal/gateway"
@@ -61,7 +62,13 @@ func main() {
 		for _, name := range m.Capabilities {
 			caps = append(caps, provider.Capability(name))
 		}
-		_ = models.RegisterWithReasoningEffortAliases(scheduler.ModelSpec{ID: id, Provider: m.Provider, Capabilities: caps, FailoverTo: append([]string(nil), m.FailoverTo...), TimeoutSec: m.TimeoutSec, GuestAllowed: m.Guest})
+		spec := scheduler.ModelSpec{ID: id, Provider: m.Provider, Capabilities: caps, FailoverTo: append([]string(nil), m.FailoverTo...), TimeoutSec: m.TimeoutSec, GuestAllowed: m.Guest, BaseModel: m.BaseModel, ImageMode: m.ImageMode}
+		if spec.ImageMode {
+			// Effort aliases would point at this ID and defeat BaseModel.
+			_ = models.Register(spec)
+			continue
+		}
+		_ = models.RegisterWithReasoningEffortAliases(spec)
 	}
 	registry := provider.NewRegistry()
 	piperAdapter := piper.New(os.Getenv("PIPER_BIN"), os.Getenv("PIPER_MODELS_DIR"))
@@ -188,9 +195,6 @@ func main() {
 	colabSupervisor := colabsupervisor.New(database.DB, colabsupervisor.Config{
 		TokenDir: colabTokenDir,
 		Command:  os.Getenv("COLAB_SUPERVISOR_CMD"),
-		// Cold start (pip install + GGUF download + model load) takes 10-20 min,
-		// combined LLM+TTS worker up to ~30 min.
-		CommandTimeout: 35 * time.Minute,
 	})
 	handler.SetColabSupervisor(colabSupervisor)
 	browserMgr := browser.NewManager("data/profiles", func(accountID, email, cookieStr, profileDir string) error {
@@ -292,6 +296,30 @@ func main() {
 						}
 					}
 				}
+			}
+		}
+	}()
+	// Copilot Chathub tokens live ~1h; re-capture from the signed-in profile
+	// before they expire so an idle pool never flips to AUTH_REQUIRED.
+	// ponytail: sequential capture (one headless Chrome at a time).
+	go func() {
+		run := func() {
+			n, err := copilotrefresh.Refresh(reclaimCtx, identityManager, "data/profiles", 20*time.Minute)
+			if n > 0 || err != nil {
+				log.Printf("[CopilotRefresh] done: refreshed=%d err=%v", n, err)
+			}
+		}
+		run() // a restart usually means some stored tokens are already stale
+		// Copilot only re-mints a Chathub token once the old one expires, so a
+		// tight tick keeps the post-expiry gap to a few minutes.
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-reclaimCtx.Done():
+				return
+			case <-ticker.C:
+				run()
 			}
 		}
 	}()

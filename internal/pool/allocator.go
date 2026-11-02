@@ -170,9 +170,16 @@ func (a *Allocator) Allocate(creds []identity.Credential, session bool) []Candid
 		preferred, other = workerPool, sessionPool
 	}
 
-	// Sort candidates: least active leases first, then highest priority.
+	// Sort candidates: HEALTHY first, then least active leases, then highest priority.
+	// DEGRADED accounts are usually stale upstream sessions that hang until the model
+	// timeout, so only fall back to them when no healthy account is available.
 	sortCandidates := func(cs []Candidate) {
 		sort.Slice(cs, func(i, j int) bool {
+			hi := cs[i].Credential.Status == identity.StatusHealthy
+			hj := cs[j].Credential.Status == identity.StatusHealthy
+			if hi != hj {
+				return hi
+			}
 			if cs[i].Active != cs[j].Active {
 				return cs[i].Active < cs[j].Active
 			}

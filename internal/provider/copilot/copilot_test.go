@@ -78,13 +78,13 @@ func TestFormatMessagesAndUpstreamRoundTrip(t *testing.T) {
 	if !strings.Contains(text, "User: hello") || !strings.Contains(text, "Assistant: hi") {
 		t.Fatalf("text=%q", text)
 	}
-	state := upstreamFromSession(Session{ConversationID: "c", ChatSessionID: "s", InvocationID: 2})
-	if state.ConversationID != "c" || state.ChatSessionID != "s" || state.InvocationID != 2 {
+	state := upstreamFromSession(Session{ConversationID: "c", ChatSessionID: "s"})
+	if state.ConversationID != "c" || state.ChatSessionID != "s" {
 		t.Fatalf("state=%+v", state)
 	}
 	got := sessionFromUpstream(state)
-	if got.ConversationID != "c" || got.ChatSessionID != "s" || got.InvocationID != 2 {
-		t.Fatalf("session=%+v", got)
+	if got.ConversationID != "c" || got.ChatSessionID != "s" {
+		t.Fatalf("continuation must preserve session IDs, got %+v", got)
 	}
 }
 

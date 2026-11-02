@@ -208,8 +208,19 @@ func (s *APIKeys) AuthenticateWithScope(candidate, scope string) (APIKey, error)
 	if scope != "" {
 		allowed := false
 		for _, permitted := range key.Scopes {
+			permitted = strings.TrimSpace(permitted)
 			if permitted == "all" || permitted == scope {
 				allowed = true
+				break
+			}
+			// Alternate-scope paths use "a|b", e.g. /v1/files accepts images or video.
+			for _, alternative := range strings.Split(scope, "|") {
+				if permitted == strings.TrimSpace(alternative) {
+					allowed = true
+					break
+				}
+			}
+			if allowed {
 				break
 			}
 		}

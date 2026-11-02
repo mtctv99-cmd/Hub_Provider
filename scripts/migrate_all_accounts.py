@@ -22,8 +22,7 @@ import time
 from pathlib import Path
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-DEFAULT_MASTER_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-MASTER_KEY_HEX = os.environ.get("MASTER_KEY", DEFAULT_MASTER_KEY)
+MASTER_KEY_HEX = os.environ.get("MASTER_KEY", "00" * 32)
 DB_PATH = os.environ.get("DB_PATH", "data/orchestrator.db")
 
 aesgcm = AESGCM(bytes.fromhex(MASTER_KEY_HEX))
@@ -258,7 +257,7 @@ def migrate_tiktok(conn: sqlite3.Connection):
 
 def add_admin_api_key(conn: sqlite3.Connection):
     print("\n--- 4. Provisioning Admin API Key ---")
-    admin_key = "sk-sp-admin-key-production"
+    admin_key = os.environ.get("ADMIN_KEY", "sk-sp-admin-key-production")
     h = hashlib.sha256(admin_key.encode("utf-8")).digest()
     key_hash = base64.urlsafe_b64encode(h).decode().rstrip("=")
 

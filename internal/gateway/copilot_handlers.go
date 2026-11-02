@@ -4,15 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"sever_provider/internal/browser"
+	"sever_provider/internal/copilotrefresh"
 	"sever_provider/internal/identity"
 	"sever_provider/internal/provider/copilot"
 )
+
+var copilotRefreshRunning atomic.Bool
 
 // CopilotImport provisions an encrypted Copilot token URL under a dedicated
 // identity. The token URL is never returned after ingestion.
@@ -153,6 +158,46 @@ func (h *Handler) CopilotAutoLogin(w http.ResponseWriter, r *http.Request) {
 		"account_id": id,
 		"message":    "Browser opened for Copilot. Sign in manually to capture session.",
 	})
+}
+
+// CopilotRefresh re-captures expiring Copilot tokens from the signed-in Chrome
+// profiles, headless and without user input.
+func (h *Handler) CopilotRefresh(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAdmin(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	manager, ok := h.Credentials.(*identity.Manager)
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, "identity manager is unavailable", "server_error", "identity_store_unavailable")
+		return
+	}
+	// Refresh walks the pool with a headless browser and can outrun the server
+	// write timeout, so it runs in the background and reports through the log.
+	if !copilotRefreshRunning.CompareAndSwap(false, true) {
+		writeJSON(w, http.StatusAccepted, map[string]any{"success": true, "started": false, "message": "refresh already running"})
+		return
+	}
+	lead := 20 * time.Minute
+	if r.URL.Query().Get("force") != "" {
+		lead = -1
+	}
+	go func() {
+		defer copilotRefreshRunning.Store(false)
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[CopilotRefresh] recovered from panic: %v", r)
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		n, err := copilotrefresh.Refresh(ctx, manager, "data/profiles", lead)
+		log.Printf("[CopilotRefresh] manual refresh done: refreshed=%d err=%v", n, err)
+	}()
+	writeJSON(w, http.StatusAccepted, map[string]any{"success": true, "started": true})
 }
 
 func (h *Handler) CopilotAutoLoginStatus(w http.ResponseWriter, r *http.Request) {

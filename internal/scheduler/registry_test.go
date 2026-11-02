@@ -11,7 +11,7 @@ func TestRegisterGeminiReasoningEffortAliases(t *testing.T) {
 	spec := ModelSpec{
 		ID:           "gemini-3.8-flash",
 		Provider:     "gemini_web",
-		Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming, provider.CapabilityReasoning},
+		Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming, provider.CapabilityReasoning, provider.CapabilityImage},
 		TimeoutSec:   90,
 	}
 	if err := models.RegisterWithReasoningEffortAliases(spec); err != nil {
@@ -24,6 +24,9 @@ func TestRegisterGeminiReasoningEffortAliases(t *testing.T) {
 		}
 		if alias.BaseModel != spec.ID || alias.ReasoningEffort != effort || alias.Provider != spec.Provider || alias.TimeoutSec != spec.TimeoutSec {
 			t.Fatalf("unexpected %s alias: %+v", effort, alias)
+		}
+		if !contains(alias.Capabilities, provider.CapabilityImage) {
+			t.Fatalf("%s alias dropped image_generation capability: %v", effort, alias.Capabilities)
 		}
 		gotReq := providerModelRequest(provider.ChatRequest{Model: alias.ID}, alias)
 		if gotReq.Model != spec.ID || gotReq.ReasoningEffort != effort {

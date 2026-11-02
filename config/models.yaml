@@ -5,12 +5,20 @@ models:
     provider: gemini_web
     capabilities: [chat, streaming, vision, reasoning, image_generation]
     failover_to: [gemini-3.1-pro]
-    timeout_sec: 90
+    timeout_sec: 180
+  # Chế độ tạo ảnh kiểu toggle của Gemini web: gọi model này là mọi lượt đều
+  # render ảnh, và giữ X-Session-ID để nối tiếp cùng hội thoại/phong cách.
+  gemini-image:
+    provider: gemini_web
+    base_model: gemini-3.8-flash
+    capabilities: [chat, streaming, image_generation]
+    timeout_sec: 180
+    image_mode: true
   gemini-3.6-flash:
     provider: gemini_web
     capabilities: [chat, streaming, vision, reasoning, image_generation]
     failover_to: [gemini-3.1-pro]
-    timeout_sec: 90
+    timeout_sec: 120
   gemini-4-argon:
     provider: gemini_web
     capabilities: [chat, streaming, reasoning, vision]
@@ -45,8 +53,8 @@ models:
     timeout_sec: 180
   gemini-3.5-flash-lite:
     provider: gemini_web
-    capabilities: [chat, streaming]
-    timeout_sec: 60
+    capabilities: [chat, streaming, vision]
+    timeout_sec: 120
     guest: true
   gpt-5.6:
     provider: copilot_ws

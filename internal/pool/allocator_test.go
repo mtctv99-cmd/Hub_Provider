@@ -105,3 +105,20 @@ func TestAllocatorIdleSessionBorrowsForWorkerTraffic(t *testing.T) {
 		t.Error("busy session account acc-2 was erroneously borrowed")
 	}
 }
+
+func TestAllocatePrefersHealthyOverDegraded(t *testing.T) {
+	a := New()
+	a.SetPriority("degraded", 100) // higher priority must not win over health
+	creds := []identity.Credential{
+		{ID: "degraded", PoolRole: identity.PoolAuto, Status: identity.StatusDegraded, MaxConcurrency: 1},
+		{ID: "healthy-1", PoolRole: identity.PoolAuto, Status: identity.StatusHealthy, MaxConcurrency: 1},
+		{ID: "healthy-2", PoolRole: identity.PoolAuto, Status: identity.StatusHealthy, MaxConcurrency: 1},
+		{ID: "healthy-3", PoolRole: identity.PoolAuto, Status: identity.StatusHealthy, MaxConcurrency: 1},
+	}
+	for _, session := range []bool{true, false} {
+		got := a.Allocate(creds, session)
+		if len(got) == 0 || got[0].Credential.ID == "degraded" {
+			t.Fatalf("session=%v: degraded allocated first: %+v", session, got)
+		}
+	}
+}

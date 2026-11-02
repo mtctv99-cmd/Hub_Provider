@@ -25,6 +25,12 @@ type Model struct {
 	FailoverTo   []string `yaml:"failover_to"`
 	TimeoutSec   int      `yaml:"timeout_sec"`
 	Guest        bool     `yaml:"guest"`
+	// BaseModel lets a public ID front another model (e.g. an image-mode name
+	// that always renders through the image-capable model).
+	BaseModel string `yaml:"base_model"`
+	// ImageMode forces image generation for every chat turn on this model, the
+	// way Gemini web's image toggle does.
+	ImageMode bool `yaml:"image_mode"`
 }
 type Config struct {
 	Server Server           `yaml:"server"`
@@ -61,20 +67,20 @@ func Load(dir string) (Config, error) {
 			cfg.Models[k] = v
 		}
 	}
-		if h := os.Getenv("SERVER_HOST"); h != "" {
-			cfg.Server.Host = h
-		} else if h := os.Getenv("HOST"); h != "" {
-			cfg.Server.Host = h
+	if h := os.Getenv("SERVER_HOST"); h != "" {
+		cfg.Server.Host = h
+	} else if h := os.Getenv("HOST"); h != "" {
+		cfg.Server.Host = h
+	}
+	if p := os.Getenv("SERVER_PORT"); p != "" {
+		if n, err := strconv.Atoi(p); err == nil {
+			cfg.Server.Port = n
 		}
-		if p := os.Getenv("SERVER_PORT"); p != "" {
-			if n, err := strconv.Atoi(p); err == nil {
-				cfg.Server.Port = n
-			}
-		} else if p := os.Getenv("PORT"); p != "" {
-			if n, err := strconv.Atoi(p); err == nil {
-				cfg.Server.Port = n
-			}
+	} else if p := os.Getenv("PORT"); p != "" {
+		if n, err := strconv.Atoi(p); err == nil {
+			cfg.Server.Port = n
 		}
+	}
 	if path := os.Getenv("DB_PATH"); path != "" {
 		cfg.Server.DBPath = path
 	}

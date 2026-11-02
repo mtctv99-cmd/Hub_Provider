@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -58,10 +59,57 @@ func (a *Adapter) Chat(ctx context.Context, req provider.ChatRequest, secret []b
 		}
 	}
 	metadata := ConversationMetadata{ConversationID: req.Upstream.ConversationID, ResponseID: req.Upstream.ResponseID, ChoiceID: req.Upstream.ChoiceID}
-	text, returned, err := a.GenerateWithFilesAndThinking(ctx, prompt, req.Model, cookie, metadata, files, req.ReasoningEffort)
+	if req.ImageGeneration {
+		promptText := lastUserText(req.Messages)
+		if promptText == "" {
+			return provider.ChatResponse{}, provider.ErrCapabilityUnsupported
+		}
+		raw, err := a.generateImageRaw(ctx, "Generate an image of: "+promptText, req.Model, cookie, metadata)
+		if err != nil {
+			if errors.Is(err, provider.ErrCapabilityUnsupported) {
+				return provider.ChatResponse{}, err
+			}
+			return provider.ChatResponse{}, fmt.Errorf("gemini image generation: %w", err)
+		}
+		imageURL, err := extractGeneratedImageURL(raw)
+		if err != nil {
+			return provider.ChatResponse{}, fmt.Errorf("gemini image response: %w", provider.ErrImageBytesUnavailable)
+		}
+		imageResp, dlErr := a.downloadGeneratedImageWithCookie(ctx, imageURL, "", false)
+		if dlErr != nil {
+			imageResp, dlErr = a.downloadGeneratedImageWithCookie(ctx, imageURL, cookie, true)
+		}
+		if dlErr != nil {
+			return provider.ChatResponse{}, fmt.Errorf("gemini image download: %w", provider.ErrImageBytesUnavailable)
+		}
+		upstream := provider.UpstreamState{}
+		if meta := ExtractConversationMetadata(raw); !meta.Empty() {
+			upstream = provider.UpstreamState{ConversationID: meta.ConversationID, ResponseID: meta.ResponseID, ChoiceID: meta.ChoiceID}
+		}
+		return provider.ChatResponse{
+			ID:           "gemini-" + strconv.FormatInt(time.Now().UnixNano(), 10),
+			Model:        req.Model,
+			Content:      ExtractResponseText(raw),
+			FinishReason: "stop",
+			ImageData:    imageResp.Data,
+			ImageMIME:    imageResp.MIME,
+			Upstream:     upstream,
+		}, nil
+	}
+	raw, err := a.generateRaw(ctx, prompt, req.Model, cookie, metadata, files, 0, req.ReasoningEffort)
 	if err != nil {
 		return provider.ChatResponse{}, err
 	}
+	text := ExtractResponseText(raw)
+	if strings.TrimSpace(text) == "" {
+		// An image-only payload must surface as a capability error, not a 502:
+		// cleanText already stripped the marker, so inspect raw first.
+		if hasImageGenerationMarker(raw) {
+			return provider.ChatResponse{}, provider.ErrCapabilityUnsupported
+		}
+		return provider.ChatResponse{}, DiagnoseEmptyResponse(raw)
+	}
+	returned := ExtractConversationMetadata(raw)
 	cleanText := text
 	var toolCalls []provider.ToolCall
 	finishReason := "stop"
@@ -91,6 +139,9 @@ func (a *Adapter) Chat(ctx context.Context, req provider.ChatRequest, secret []b
 	}, nil
 }
 func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, secret []byte) (<-chan provider.StreamChunk, error) {
+	if req.ImageGeneration {
+		return nil, provider.ErrCapabilityUnsupported
+	}
 	prompt := formatPromptWithTools(req.Messages, req.Tools, req.ToolChoice)
 	var cred struct {
 		Cookie string `json:"cookie"`
@@ -434,6 +485,20 @@ func truncate(value string, max int) string {
 		return value
 	}
 	return value[:max]
+}
+
+// lastUserText returns the trimmed text of the last user message, which is the
+// only prompt the image RPC can carry (mode-10 ignores history and tools).
+func lastUserText(messages []provider.Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if !strings.EqualFold(strings.TrimSpace(messages[i].Role), "user") {
+			continue
+		}
+		if text := strings.TrimSpace(messages[i].TextContent()); text != "" {
+			return text
+		}
+	}
+	return ""
 }
 
 func formatPrompt(messages []provider.Message) string {

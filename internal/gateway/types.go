@@ -16,6 +16,8 @@ type ChatCompletionRequest struct {
 	Stream          bool               `json:"stream,omitempty"`
 	Temperature     *float32           `json:"temperature,omitempty"`
 	MaxTokens       int                `json:"max_tokens,omitempty"`
+	Modalities      []string           `json:"modalities,omitempty"`
+	ImageGeneration bool               `json:"image_generation,omitempty"`
 }
 
 type ChatCompletionResponse struct {

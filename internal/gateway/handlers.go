@@ -212,15 +212,16 @@ func (h *Handler) ModelsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type item struct {
-		ID        string `json:"id"`
-		Object    string `json:"object"`
-		Created   int64  `json:"created"`
-		OwnedBy   string `json:"owned_by"`
-		Available bool   `json:"available,omitempty"`
+		ID           string                `json:"id"`
+		Object       string                `json:"object"`
+		Created      int64                 `json:"created"`
+		OwnedBy      string                `json:"owned_by"`
+		Available    bool                  `json:"available,omitempty"`
+		Capabilities []provider.Capability `json:"capabilities,omitempty"`
 	}
 	items := make([]item, 0)
 	for _, spec := range h.Models.List() {
-		items = append(items, item{ID: spec.ID, Object: "model", Created: 1700000000, OwnedBy: "maika-hub", Available: h.modelAvailable(spec)})
+		items = append(items, item{ID: spec.ID, Object: "model", Created: 1700000000, OwnedBy: "maika-hub", Available: h.modelAvailable(spec), Capabilities: spec.Capabilities})
 	}
 	if h.Workers != nil {
 		seen := make(map[string]bool, len(items))
@@ -321,6 +322,14 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if !h.applyReasoningAlias(w, req.Model, &req.ReasoningEffort) {
 		return
 	}
+	wantsImage := wantsImageGeneration(req)
+	if !wantsImage && h.Models != nil {
+		// An image-mode model (e.g. gemini-image) renders every turn, mirroring
+		// Gemini web's image toggle without clients sending a flag.
+		if spec, ok := h.Models.Get(req.Model); ok && spec.ImageMode {
+			wantsImage = true
+		}
+	}
 	hasImages := false
 	for _, message := range req.Messages {
 		if message.HasImages() {
@@ -337,6 +346,32 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "selected model does not support image inputs", "invalid_request_error", "unsupported_capability")
 		return
 	}
+	dispatchModel := req.Model
+	if wantsImage {
+		if h.Models == nil {
+			writeError(w, http.StatusBadRequest, "requested capability unsupported by provider", "provider_error", "unsupported_capability")
+			return
+		}
+		if !h.Models.HasCapability(req.Model, provider.CapabilityImage) {
+			// Gemini web exposes image generation as a tool: with the toggle on,
+			// the selected chat model does not matter. Mirror that instead of
+			// rejecting the request, by dispatching to the provider's image model.
+			alt, ok := h.imageModelFor(req.Model)
+			if !ok {
+				writeError(w, http.StatusBadRequest, "requested capability unsupported by provider", "provider_error", "unsupported_capability")
+				return
+			}
+			dispatchModel = alt
+		}
+		if hasImages {
+			writeError(w, http.StatusBadRequest, "image-to-image generation is not supported", "invalid_request_error", "unsupported_option")
+			return
+		}
+		if lastUserMessageText(req.Messages) == "" {
+			writeError(w, http.StatusBadRequest, "image generation requires a user prompt", "invalid_request_error", "missing_parameter")
+			return
+		}
+	}
 	ctx := r.Context()
 	sessionID := strings.TrimSpace(r.Header.Get("X-Session-ID"))
 	if len(sessionID) > 256 {
@@ -346,7 +381,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if sessionID != "" {
 		w.Header().Set("X-Session-ID", sessionID)
 	}
-	chatReq := provider.ChatRequest{Model: req.Model, ReasoningEffort: req.ReasoningEffort, SessionID: sessionID, Messages: req.Messages, Tools: req.Tools, ToolChoice: req.ToolChoice, Stream: req.Stream, Temperature: req.Temperature, MaxTokens: req.MaxTokens}
+	chatReq := provider.ChatRequest{Model: dispatchModel, ReasoningEffort: req.ReasoningEffort, SessionID: sessionID, Messages: req.Messages, Tools: req.Tools, ToolChoice: req.ToolChoice, Stream: req.Stream, Temperature: req.Temperature, MaxTokens: req.MaxTokens, ImageGeneration: wantsImage}
 	isWorkerModel := false
 	if spec, ok := h.Models.Get(req.Model); ok && (spec.Provider == "google_colab" || spec.Provider == "vllm") {
 		isWorkerModel = true
@@ -387,6 +422,10 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Stream {
+		if wantsImage {
+			h.streamImageChat(w, ctx, chatReq, r.Header.Get("X-Request-ID"), started)
+			return
+		}
 		h.streamChat(w, ctx, chatReq, r.Header.Get("X-Request-ID"), started)
 		return
 	}
@@ -409,7 +448,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, userMsg, "provider_error", code)
 		return
 	}
-	if strings.TrimSpace(resp.Content) == "" && strings.TrimSpace(resp.ReasoningContent) == "" && len(resp.ToolCalls) == 0 {
+	if strings.TrimSpace(resp.Content) == "" && strings.TrimSpace(resp.ReasoningContent) == "" && len(resp.ToolCalls) == 0 && len(resp.ImageData) == 0 {
 		// Defensive guard: the dispatcher already rejects empty turns, but an
 		// adapter bypassing it must still surface empty_response instead of a
 		// false success audit and a 200 with empty content.
@@ -435,6 +474,12 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if h.Traffic != nil && resp.Usage.TotalTokens > 0 {
 		go func(tok int) { _ = h.Traffic.RecordMetrics(context.Background(), time.Now(), 0, int64(tok), 0) }(resp.Usage.TotalTokens)
 	}
+	if len(resp.ImageData) > 0 {
+		if storeErr := h.attachGeneratedImage(&resp); storeErr != nil {
+			writeImageStoreError(w, storeErr)
+			return
+		}
+	}
 	if h.AuditLog != nil {
 		auditCtx, auditCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer auditCancel()
@@ -450,8 +495,103 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if resp.FinishReason != "" {
 		finish = resp.FinishReason
 	}
-	msg := &provider.Message{Role: "assistant", Content: resp.Content, ReasoningContent: resp.ReasoningContent, ToolCalls: resp.ToolCalls}
+	msg := &provider.Message{Role: "assistant", Content: resp.Content, ReasoningContent: resp.ReasoningContent, ToolCalls: resp.ToolCalls, Images: resp.Images}
 	writeJSON(w, 200, ChatCompletionResponse{ID: resp.ID, Object: "chat.completion", Created: time.Now().Unix(), Model: req.Model, Choices: []Choice{{Index: 0, Message: msg, FinishReason: &finish}}, Usage: resp.Usage})
+}
+
+// attachGeneratedImage stores image bytes for the URL and also embeds the
+// OpenAI chat image shape (message.images[].image_url.url) as a data: URI so
+// clients that read base64 from chat work unchanged. Content stays a short
+// markdown URL: replaying a full data: URI would exceed the 10MB request cap.
+func (h *Handler) attachGeneratedImage(resp *provider.ChatResponse) error {
+	url, err := h.persistGeneratedImage(resp.ImageData, resp.ImageMIME)
+	if err != nil {
+		return err
+	}
+	mime := resp.ImageMIME
+	if !strings.HasPrefix(mime, "image/") {
+		mime = "image/png"
+	}
+	resp.Images = []provider.MessageImage{{
+		Type:     "image_url",
+		ImageURL: &provider.ImageURL{URL: "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(resp.ImageData)},
+	}}
+	if resp.Content != "" {
+		resp.Content = strings.TrimRight(resp.Content, "\n") + "\n\n"
+	}
+	resp.Content += "![generated image](" + url + ")"
+	return nil
+}
+
+func writeImageStoreError(w http.ResponseWriter, err error) {
+	log.Printf("[GATEWAY] failed to store generated image: %v", err)
+	switch {
+	case errors.Is(err, errImageTooLarge):
+		writeError(w, http.StatusBadGateway, "generated image is too large", "provider_error", "image_too_large")
+	case errors.Is(err, errImageStorageUnavailable):
+		writeError(w, http.StatusServiceUnavailable, "image storage unavailable", "server_error", "image_storage_unavailable")
+	default:
+		writeError(w, http.StatusInternalServerError, "failed to store generated image", "server_error", "file_store_failed")
+	}
+}
+
+// streamImageChat generates the image through the non-stream adapter call and
+// emits it as one SSE delta. Providers do not stream image bytes token-by-token.
+func (h *Handler) streamImageChat(w http.ResponseWriter, ctx context.Context, req provider.ChatRequest, requestID string, started time.Time) {
+	audit := func(errKind, detail string) {
+		if h.AuditLog == nil {
+			return
+		}
+		_ = h.AuditLog.Record(ctx, admin.AuditEvent{RequestID: requestID, EventType: "chat_completion_stream", Model: req.Model, Latency: time.Since(started), ErrorKind: errKind, Detail: detail})
+	}
+	resp, err := h.Dispatcher.Chat(ctx, req)
+	if err != nil {
+		log.Printf("[GATEWAY] streaming image chat failed: %v", err)
+		status, userMsg, code := maskProviderError(err)
+		audit(code, userMsg)
+		writeError(w, status, userMsg, "provider_error", code)
+		return
+	}
+	if strings.TrimSpace(resp.Content) == "" && len(resp.ToolCalls) == 0 && len(resp.ImageData) == 0 {
+		emptyErr := provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, "upstream completed with empty content")
+		_, userMsg, code := maskProviderError(emptyErr)
+		audit(code, userMsg)
+		writeError(w, http.StatusBadGateway, userMsg, "provider_error", code)
+		return
+	}
+	resp.Usage = provider.ComputeUsage(req.Messages, req.Tools, resp.Content, resp.ReasoningContent, resp.ToolCalls, &resp.Usage)
+	h.AITokens.Add(uint64(resp.Usage.TotalTokens))
+	if h.Traffic != nil && resp.Usage.TotalTokens > 0 {
+		go func(tok int) { _ = h.Traffic.RecordMetrics(context.Background(), time.Now(), 0, int64(tok), 0) }(resp.Usage.TotalTokens)
+	}
+	if len(resp.ImageData) > 0 {
+		if storeErr := h.attachGeneratedImage(&resp); storeErr != nil {
+			audit("image_store_failed", storeErr.Error())
+			writeImageStoreError(w, storeErr)
+			return
+		}
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		audit("streaming_unsupported", "streaming unsupported")
+		writeError(w, 500, "streaming unsupported", "server_error", "streaming_unsupported")
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	id := "chatcmpl-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	created := time.Now().Unix()
+	finish := "stop"
+	if resp.FinishReason != "" {
+		finish = resp.FinishReason
+	}
+	delta := &provider.Message{Role: "assistant", Content: resp.Content, ReasoningContent: resp.ReasoningContent, ToolCalls: resp.ToolCalls, Images: resp.Images}
+	block, _ := json.Marshal(ChatCompletionResponse{ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model, Choices: []Choice{{Index: 0, Delta: delta, FinishReason: &finish}}, Usage: resp.Usage})
+	fmt.Fprintf(w, "data: %s\n\n", block)
+	audit("", "success")
+	fmt.Fprint(w, "data: [DONE]\n\n")
+	flusher.Flush()
 }
 
 func (h *Handler) streamChat(w http.ResponseWriter, ctx context.Context, req provider.ChatRequest, requestID string, started time.Time) {
@@ -632,6 +772,94 @@ func (h *Handler) AudioSpeech(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+var (
+	errImageTooLarge           = errors.New("generated image is too large")
+	errImageStorageUnavailable = errors.New("image storage unavailable")
+)
+
+const maxGeneratedImageBytes = 16 << 20
+
+// persistGeneratedImage stores bytes in the media store and returns the
+// relative URL. Empty data is not an error: providers may return only a URL.
+func (h *Handler) persistGeneratedImage(data []byte, mime string) (string, error) {
+	if len(data) == 0 {
+		return "", nil
+	}
+	if len(data) > maxGeneratedImageBytes {
+		return "", errImageTooLarge
+	}
+	if h.MediaStore == nil {
+		return "", errImageStorageUnavailable
+	}
+	ext := ".png"
+	switch mime {
+	case "image/jpeg":
+		ext = ".jpg"
+	case "image/webp":
+		ext = ".webp"
+	case "image/gif":
+		ext = ".gif"
+	}
+	id, err := h.MediaStore.Save(data, ext)
+	if err != nil {
+		return "", err
+	}
+	return "/v1/files/" + id, nil
+}
+
+// imageModelFor returns an image-capable model on the same provider. It lets an
+// explicit image request on a plain Gemini chat model behave like Gemini web's
+// image toggle, where the selected chat model does not gate image creation.
+func (h *Handler) imageModelFor(model string) (string, bool) {
+	if h.Models == nil {
+		return "", false
+	}
+	spec, ok := h.Models.Get(model)
+	if !ok || spec.Provider != "gemini_web" {
+		return "", false
+	}
+	for _, candidate := range h.Models.List() {
+		if candidate.Provider != spec.Provider {
+			continue
+		}
+		for _, capability := range candidate.Capabilities {
+			if capability == provider.CapabilityImage {
+				return candidate.ID, true
+			}
+		}
+	}
+	return "", false
+}
+
+func wantsImageGeneration(req ChatCompletionRequest) bool {
+	if req.ImageGeneration {
+		return true
+	}
+	for _, modality := range req.Modalities {
+		if strings.EqualFold(strings.TrimSpace(modality), "image") {
+			return true
+		}
+	}
+	for _, tool := range req.Tools {
+		if strings.EqualFold(strings.TrimSpace(tool.Type), "image_generation") {
+			return true
+		}
+	}
+	return false
+}
+
+func lastUserMessageText(messages []provider.Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if !strings.EqualFold(strings.TrimSpace(messages[i].Role), "user") {
+			continue
+		}
+		if text := strings.TrimSpace(messages[i].TextContent()); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
 func (h *Handler) Images(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
@@ -677,6 +905,35 @@ func (h *Handler) Images(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, userMsg, "provider_error", code)
 		return
 	}
+	url, storeErr := h.persistGeneratedImage(resp.Data, resp.MIME)
+	if errors.Is(storeErr, errImageTooLarge) {
+		writeError(w, http.StatusBadGateway, "generated image is too large", "provider_error", "image_too_large")
+		return
+	}
+	if storeErr != nil {
+		log.Printf("[GATEWAY] failed to store generated image: %v", storeErr)
+		if req.ResponseFormat == "url" && resp.URL == "" {
+			writeError(w, http.StatusInternalServerError, "failed to store generated image", "server_error", "file_store_failed")
+			return
+		}
+	}
+	if url == "" {
+		url = resp.URL
+	}
+	item := map[string]string{}
+	if req.ResponseFormat != "url" && len(resp.Data) > 0 {
+		item["b64_json"] = base64.StdEncoding.EncodeToString(resp.Data)
+	} else if req.ResponseFormat == "b64_json" {
+		writeError(w, http.StatusBadGateway, "image bytes unavailable for base64 response", "provider_error", "image_bytes_unavailable")
+		return
+	}
+	if url != "" {
+		item["url"] = url
+	}
+	if len(item) == 0 {
+		writeError(w, http.StatusServiceUnavailable, "image storage unavailable", "server_error", "image_storage_unavailable")
+		return
+	}
 	if h.AuditLog != nil {
 		auditCtx, auditCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 		defer auditCancel()
@@ -688,35 +945,7 @@ func (h *Handler) Images(w http.ResponseWriter, r *http.Request) {
 			Detail:    "success",
 		})
 	}
-	if req.ResponseFormat == "b64_json" {
-		if len(resp.Data) == 0 {
-			writeError(w, http.StatusBadGateway, "image bytes unavailable for base64 response", "provider_error", "image_bytes_unavailable")
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"created": time.Now().Unix(), "data": []map[string]string{{"b64_json": base64.StdEncoding.EncodeToString(resp.Data)}}})
-		return
-	}
-	if len(resp.Data) > 0 && h.MediaStore != nil {
-		ext := ".png"
-		if resp.MIME == "image/jpeg" {
-			ext = ".jpg"
-		} else if resp.MIME == "image/webp" {
-			ext = ".webp"
-		} else if resp.MIME == "image/gif" {
-			ext = ".gif"
-		}
-		id, saveErr := h.MediaStore.Save(resp.Data, ext)
-		if saveErr != nil {
-			writeError(w, http.StatusInternalServerError, "failed to store generated image", "server_error", "file_store_failed")
-			return
-		}
-		resp.URL = "/v1/files/" + id
-	}
-	if resp.URL == "" {
-		writeError(w, http.StatusServiceUnavailable, "image storage unavailable", "server_error", "image_storage_unavailable")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"created": time.Now().Unix(), "data": []map[string]string{{"url": resp.URL}}})
+	writeJSON(w, http.StatusOK, map[string]any{"created": time.Now().Unix(), "data": []map[string]string{item}})
 }
 
 func (h *Handler) DashboardStatus(w http.ResponseWriter, r *http.Request) {
@@ -807,6 +1036,11 @@ func (h *Handler) DashboardStatus(w http.ResponseWriter, r *http.Request) {
 					for i := range items {
 						items[i].ActiveLeases = h.Leases.ActiveLeasesFor(items[i].ID)
 					}
+				}
+				// Encode no credentials as [] rather than null so the dashboard can
+				// iterate the key without a nil check.
+				if items == nil {
+					items = []identity.Credential{}
 				}
 				status[domain] = items
 			}
@@ -953,6 +1187,12 @@ func maskProviderError(err error) (int, string, string) {
 	}
 	if strings.Contains(lower, "no available credential") {
 		return http.StatusServiceUnavailable, "no available provider credential", "no_available_credential"
+	}
+	if errors.Is(err, provider.ErrImageBytesUnavailable) || strings.Contains(lower, "image bytes unavailable") {
+		return http.StatusBadGateway, "generated image bytes unavailable", "image_bytes_unavailable"
+	}
+	if errors.Is(err, provider.ErrCapabilityUnsupported) || strings.Contains(lower, "does not support requested capability") {
+		return http.StatusBadRequest, "requested capability unsupported by provider", "unsupported_capability"
 	}
 	if strings.Contains(lower, "unsupported") {
 		return http.StatusBadRequest, "requested capability unsupported by provider", "unsupported_capability"

@@ -80,6 +80,14 @@ func (d *Dispatcher) chatWithFailover(ctx context.Context, req provider.ChatRequ
 		if fallback == "" || visited[fallback] {
 			continue
 		}
+		// An image request must not fail over to a text-only model: that would
+		// turn a generation failure into a misleading 400 from the fallback.
+		if req.ImageGeneration {
+			fallbackSpec, ok := d.Models.Get(fallback)
+			if !ok || !contains(fallbackSpec.Capabilities, provider.CapabilityImage) {
+				continue
+			}
+		}
 		candidate := req
 		candidate.Model = fallback
 		if response, fallbackErr := d.chatWithFailover(ctx, candidate, visited); fallbackErr == nil {
@@ -183,7 +191,7 @@ func (d *Dispatcher) chatOnce(ctx context.Context, req provider.ChatRequest) (pr
 		}()
 		// Block empty content before recording success or committing the
 		// session: an empty turn must not advance upstream continuity.
-		if callErr == nil && strings.TrimSpace(resp.Content) == "" && len(resp.ToolCalls) == 0 {
+		if callErr == nil && strings.TrimSpace(resp.Content) == "" && len(resp.ToolCalls) == 0 && len(resp.ImageData) == 0 {
 			callErr = provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, "chat returned empty content with no tool calls")
 		}
 		if callErr != nil {
@@ -220,7 +228,7 @@ func (d *Dispatcher) chatGuest(ctx context.Context, req provider.ChatRequest, sp
 	if err != nil {
 		return provider.ChatResponse{}, err
 	}
-	if strings.TrimSpace(resp.Content) == "" && len(resp.ToolCalls) == 0 {
+	if strings.TrimSpace(resp.Content) == "" && len(resp.ToolCalls) == 0 && len(resp.ImageData) == 0 {
 		return provider.ChatResponse{}, provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, "guest model returned empty content with no tool calls")
 	}
 	if d.Sessions != nil && strings.TrimSpace(req.SessionID) != "" && !resp.Upstream.Empty() {
@@ -597,6 +605,10 @@ func (d *Dispatcher) Image(ctx context.Context, req provider.ImageRequest) (prov
 	if !contains(spec.Capabilities, provider.CapabilityImage) {
 		return provider.ImageResponse{}, provider.ErrCapabilityUnsupported
 	}
+	if spec.BaseModel != "" {
+		// A public image-mode ID (gemini-image) renders through its base model.
+		req.Model = spec.BaseModel
+	}
 	adapter, ok := d.Adapters.Get(spec.Provider)
 	if !ok {
 		return provider.ImageResponse{}, fmt.Errorf("provider %q is not registered", spec.Provider)
@@ -606,6 +618,17 @@ func (d *Dispatcher) Image(ctx context.Context, req provider.ImageRequest) (prov
 		return provider.ImageResponse{}, err
 	}
 	creds = d.orderedCredentials(creds, req.SessionID)
+	// Continue the session's Gemini conversation so repeated image prompts keep
+	// the same style instead of starting a fresh one every time.
+	if strings.TrimSpace(req.SessionID) != "" && d.Sessions != nil {
+		if binding, ok := d.Sessions.Get(req.SessionID); ok && binding.Provider == spec.Provider {
+			req.Upstream = provider.UpstreamState{
+				ConversationID: binding.UpstreamConversationID,
+				ResponseID:     binding.UpstreamResponseID,
+				ChoiceID:       binding.UpstreamChoiceID,
+			}
+		}
+	}
 	now := time.Now()
 	lastErr := error(nil)
 	for _, cred := range creds {
@@ -638,6 +661,9 @@ func (d *Dispatcher) Image(ctx context.Context, req provider.ImageRequest) (prov
 		d.release(lease)
 		d.recordAttempt(ctx, spec.Provider, cred.ID, callErr)
 		if callErr == nil {
+			// Same affinity chat keeps: credential plus the upstream turn, so the
+			// next image in this session continues the conversation.
+			_ = d.bindSession(req.SessionID, cred.ID, spec.Provider, result.Upstream)
 			return result, nil
 		}
 		if lastErr == nil {
@@ -915,6 +941,11 @@ func (d *Dispatcher) orderedCredentials(creds []identity.Credential, sessionID s
 func (d *Dispatcher) recordAttempt(ctx context.Context, providerName, credentialID string, err error) {
 	// Client-initiated cancellations are not provider failures.
 	if errors.Is(err, context.Canceled) {
+		return
+	}
+	// Copilot image sanitization rejects the caller's attachment, not the
+	// account; charging it would open account breakers and stall text chat.
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "imagesanitization") {
 		return
 	}
 

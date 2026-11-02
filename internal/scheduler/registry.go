@@ -18,6 +18,8 @@ type ModelSpec struct {
 	// GuestAllowed lets a model run without any stored credential (Gemini
 	// flash-lite guest mode). The adapter is called with an empty secret.
 	GuestAllowed bool
+	// ImageMode marks a model whose every chat turn generates an image.
+	ImageMode bool
 }
 
 type ModelRegistry struct {
@@ -84,12 +86,7 @@ func (r *ModelRegistry) RegisterWithReasoningEffortAliases(spec ModelSpec) error
 		alias.ID = spec.ID + "-" + effort
 		alias.BaseModel = spec.ID
 		alias.ReasoningEffort = effort
-		alias.Capabilities = make([]provider.Capability, 0, len(spec.Capabilities))
-		for _, capability := range spec.Capabilities {
-			if capability != provider.CapabilityImage {
-				alias.Capabilities = append(alias.Capabilities, capability)
-			}
-		}
+		alias.Capabilities = append([]provider.Capability(nil), spec.Capabilities...)
 		if err := r.Register(alias); err != nil {
 			return err
 		}

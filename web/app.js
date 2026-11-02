@@ -437,19 +437,6 @@ async function loadCopilotAccounts() {
   }
 }
 
-function renderModels(models = []) {
-  const html = models.map(x => `
-    <div style="display:flex;justify-content:space-between;align-items:center;padding:12px;border-bottom:1px solid #e2e8f0">
-      <div>
-        <strong style="color:#0f172a;font-size:13px">${esc(x.id)}</strong>
-        <div class="metric-sub">${esc(x.owned_by)}</div>
-      </div>
-      <span class="credential-pill ${x.available ? 'healthy' : 'disabled'}">${x.available ? 'READY' : 'OFFLINE'}</span>
-    </div>
-  `).join('') || '<div class="empty-state">No models configured.</div>';
-  if ($('#model-list')) $('#model-list').innerHTML = html;
-}
-
 function relativeWhen(value) {
   const time = new Date(value).getTime();
   if (!Number.isFinite(time)) return '—';
@@ -658,6 +645,17 @@ async function refresh() {
     const averageLatencyMs = reqTotal > 0 ? Math.round(totalDurationMs / reqTotal) : 0;
     if ($('#row2-total-duration')) $('#row2-total-duration').textContent = formatDuration(totalDurationMs);
     if ($('#row2-avg-latency')) $('#row2-avg-latency').textContent = `${averageLatencyMs} ms avg`;
+
+    const workers = Array.isArray(status.workers) ? status.workers : [];
+    if ($('#sys-models')) $('#sys-models').textContent = Number(status.models ?? 0).toLocaleString();
+    if ($('#sys-workers')) $('#sys-workers').textContent = String(workers.length);
+    if ($('#sys-workers-detail')) {
+      const servingColab = workers.filter(w => (Array.isArray(w?.models) ? w.models : []).some(m => String(m).includes('colab') || String(m).includes('gemma'))).length;
+      const servingPiper = workers.filter(w => (Array.isArray(w?.models) ? w.models : []).some(m => String(m).startsWith('piper:'))).length;
+      $('#sys-workers-detail').textContent = workers.length ? `Colab: ${servingColab} · Piper: ${servingPiper}` : 'chưa có worker nào kết nối';
+    }
+    if ($('#sys-pending-jobs')) $('#sys-pending-jobs').textContent = String(Number(status.pending_jobs ?? 0));
+    if ($('#sys-leases')) $('#sys-leases').textContent = String(Number(status.active_leases ?? 0));
     const providerRequests = status.provider_requests || {};
 	    const requestCounters = {
 	      'status-google-requests': providerRequests.gemini_web,
@@ -1587,7 +1585,7 @@ function renderWorkers(data) {
   $('#worker-piper-remote').innerHTML = workerList(data.piper_remote, 'Chưa có remote Piper worker.');
   $('#worker-colab').innerHTML = workerList(data.colab_workers, 'Chưa có Colab worker.');
   const accounts = Array.isArray(data.colab_accounts) ? data.colab_accounts.filter(a => a && typeof a === 'object') : [];
-  $('#worker-accounts').innerHTML = accounts.length ? accounts.map(a => `<div class="worker-item"><div class="worker-item-heading"><strong>${workerSafeText(a.email || a.id)}</strong><span>${workerSafeText(a.status)}</span></div><div class="worker-meta"><span>Cooldown đến: ${workerDate(a.cooldown_until)}</span></div></div>`).join('') : '<div class="empty-state">Chưa có supervisor account.</div>';
+  $('#worker-accounts').innerHTML = accounts.length ? accounts.map(a => `<div class="worker-item"><div class="worker-item-heading"><strong>${workerSafeText(a.email || a.id)}</strong><span>${workerSafeText(a.status)}</span></div><div class="worker-meta"><span>Cooldown đến: ${workerDate(a.cooldown_until)}</span><span>Thử lần cuối: ${workerDate(a.last_attempt)}</span></div></div>`).join('') : '<div class="empty-state">Chưa có supervisor account.</div>';
   const select = $('#worker-account-select');
   const selected = select.value;
   select.innerHTML = '<option value="">Chọn tài khoản</option>' + accounts.filter(a => typeof a.id === 'string' && a.id).map(a => `<option value="${esc(a.id)}">${workerSafeText(a.email || a.id)}</option>`).join('');

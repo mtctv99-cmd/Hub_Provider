@@ -151,6 +151,31 @@
         </div>
       </section>
 
+      <section class="traffic-panel" aria-label="Tài nguyên hệ thống">
+        <div class="traffic-metrics">
+          <div class="traffic-metric">
+            <span class="traffic-metric-label">Models</span>
+            <strong class="traffic-metric-value" id="sys-models">—</strong>
+            <span class="traffic-metric-detail">đã cấu hình trong models.yaml</span>
+          </div>
+          <div class="traffic-metric">
+            <span class="traffic-metric-label">Worker online</span>
+            <strong class="traffic-metric-value" id="sys-workers">—</strong>
+            <span class="traffic-metric-detail" id="sys-workers-detail">—</span>
+          </div>
+          <div class="traffic-metric">
+            <span class="traffic-metric-label">Job chờ</span>
+            <strong class="traffic-metric-value" id="sys-pending-jobs">—</strong>
+            <span class="traffic-metric-detail">chưa xử lý</span>
+          </div>
+          <div class="traffic-metric">
+            <span class="traffic-metric-label">Lease</span>
+            <strong class="traffic-metric-value" id="sys-leases">—</strong>
+            <span class="traffic-metric-detail">credential đang được giữ</span>
+          </div>
+        </div>
+      </section>
+
       <section class="provider-cards-grid" aria-label="Số lượt chat trong 100 sự kiện audit gần nhất">
         <div class="provider-stat-card card-gemini">
           <div class="provider-stat-header">

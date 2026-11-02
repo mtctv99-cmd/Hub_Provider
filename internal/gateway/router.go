@@ -105,7 +105,7 @@ func newRouterFull(h *Handler, apiKey string, dbKeys *admin.APIKeys, maxBodyByte
 	mux.HandleFunc("/admin/api/copilot/auto-login", h.CopilotAutoLogin)
 	mux.HandleFunc("/admin/api/copilot/auto-login/status", h.CopilotAutoLoginStatus)
 	mux.HandleFunc("/admin/api/copilot/auto-login/stop", h.CopilotAutoLoginStop)
-	mux.HandleFunc("/admin/api/copilot/refresh", h.AdminUnsupported)
+	mux.HandleFunc("/admin/api/copilot/refresh", h.CopilotRefresh)
 	mux.HandleFunc("/admin/api/copilot/delete", h.CopilotDelete)
 	mux.HandleFunc("/admin/api/deepseek/accounts", h.DeepSeekAccounts)
 	mux.HandleFunc("/admin/api/deepseek/auto-login", h.DeepSeekAutoLogin)
@@ -295,6 +295,9 @@ func scopeForPath(p string) string {
 		return "images"
 	case strings.HasPrefix(p, "/v1/videos/") || strings.HasPrefix(p, "/v1/video/"):
 		return "video"
+	case strings.HasPrefix(p, "/v1/files/"):
+		// Generated images and videos are both served from the media store.
+		return "images|video"
 	case strings.HasPrefix(p, "/api/llm/jobs"):
 		return "jobs"
 	default:

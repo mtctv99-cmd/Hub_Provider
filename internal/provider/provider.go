@@ -11,6 +11,7 @@ import (
 
 var (
 	ErrCapabilityUnsupported = errors.New("provider does not support requested capability")
+	ErrImageBytesUnavailable = errors.New("generated image bytes unavailable")
 	ErrNoCapacity            = errors.New("no provider capacity available")
 	ErrProviderUnavailable   = errors.New("provider unavailable")
 	ErrEmptyResponse         = errors.New("empty_response")
@@ -98,6 +99,14 @@ type Message struct {
 	ToolCallID       string        `json:"tool_call_id,omitempty"`
 	ToolCalls        []ToolCall    `json:"tool_calls,omitempty"`
 	Parts            []ContentPart `json:"content_parts,omitempty"`
+	// Images carries generated images in OpenAI's chat message shape
+	// (message.images[].image_url.url as a data: URI).
+	Images []MessageImage `json:"images,omitempty"`
+}
+
+type MessageImage struct {
+	Type     string    `json:"type"`
+	ImageURL *ImageURL `json:"image_url,omitempty"`
 }
 
 type Tool struct {
@@ -147,6 +156,7 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 		ToolCallID       string          `json:"tool_call_id"`
 		ToolCalls        []ToolCall      `json:"tool_calls"`
 		ContentParts     []ContentPart   `json:"content_parts"`
+		Images           []MessageImage  `json:"images"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -157,6 +167,7 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 	m.ToolCallID = raw.ToolCallID
 	m.ToolCalls = raw.ToolCalls
 	m.Parts = raw.ContentParts
+	m.Images = raw.Images
 
 	if len(raw.Content) > 0 {
 		var s string
@@ -175,12 +186,13 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 
 func (m Message) MarshalJSON() ([]byte, error) {
 	type rawMessage struct {
-		Role             string     `json:"role"`
-		Content          any        `json:"content"`
-		ReasoningContent string     `json:"reasoning_content,omitempty"`
-		Name             string     `json:"name,omitempty"`
-		ToolCallID       string     `json:"tool_call_id,omitempty"`
-		ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+		Role             string         `json:"role"`
+		Content          any            `json:"content"`
+		ReasoningContent string         `json:"reasoning_content,omitempty"`
+		Name             string         `json:"name,omitempty"`
+		ToolCallID       string         `json:"tool_call_id,omitempty"`
+		ToolCalls        []ToolCall     `json:"tool_calls,omitempty"`
+		Images           []MessageImage `json:"images,omitempty"`
 	}
 	raw := rawMessage{
 		Role:             m.Role,
@@ -188,6 +200,7 @@ func (m Message) MarshalJSON() ([]byte, error) {
 		Name:             m.Name,
 		ToolCallID:       m.ToolCallID,
 		ToolCalls:        m.ToolCalls,
+		Images:           m.Images,
 	}
 	if len(m.Parts) > 0 {
 		raw.Content = m.Parts
@@ -258,6 +271,8 @@ type ChatRequest struct {
 	Temperature     *float32      `json:"temperature,omitempty"`
 	MaxTokens       int           `json:"max_tokens,omitempty"`
 	Upstream        UpstreamState `json:"upstream,omitempty"`
+	// ImageGeneration asks the adapter to produce an image instead of text.
+	ImageGeneration bool `json:"image_generation,omitempty"`
 }
 
 func (r ChatRequest) HasImages() bool {
@@ -301,6 +316,9 @@ func ComputeUsage(messages []Message, tools []Tool, content string, reasoning st
 		}
 	}
 	for _, t := range tools {
+		if t.Function == nil {
+			continue
+		}
 		promptChars += len([]rune(t.Function.Name)) + len([]rune(t.Function.Description)) + 10
 	}
 	compChars := len([]rune(content)) + len([]rune(reasoning))
@@ -332,6 +350,12 @@ type ChatResponse struct {
 	FinishReason     string        `json:"finish_reason,omitempty"`
 	Usage            Usage         `json:"usage"`
 	Upstream         UpstreamState `json:"upstream,omitempty"`
+	// ImageData/ImageMIME carry a generated image returned by chat requests
+	// that asked for image_generation. Never serialized to clients.
+	ImageData []byte `json:"-"`
+	ImageMIME string `json:"-"`
+	// Images is the serialized chat-message image shape built by the gateway.
+	Images []MessageImage `json:"images,omitempty"`
 }
 
 type StreamChunk struct {
@@ -357,12 +381,18 @@ type ImageRequest struct {
 	Prompt    string `json:"prompt"`
 	Size      string `json:"size,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
+	// Upstream carries the Gemini conversation to continue, so a repeated
+	// session keeps the same style/context instead of starting over.
+	Upstream UpstreamState `json:"-"`
 }
 
 type ImageResponse struct {
 	URL  string `json:"url,omitempty"`
 	Data []byte `json:"-"`
 	MIME string `json:"-"`
+	// Upstream is the conversation this image belongs to, persisted by the
+	// dispatcher so the next turn continues it.
+	Upstream UpstreamState `json:"-"`
 }
 
 type VideoRequest struct {
