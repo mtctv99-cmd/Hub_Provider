@@ -228,35 +228,28 @@ func (s *APIKeys) AuthenticateWithScope(candidate, scope string) (APIKey, error)
 			return APIKey{}, ErrInsufficientScope
 		}
 	}
-	tx, err := s.db.Begin()
-	if err != nil {
-		return APIKey{}, err
-	}
-	defer tx.Rollback()
-	if key.RateLimitRPM > 0 {
-		window := time.Now().UTC().Unix() / 60 * 60
-		r, err := tx.Exec(`INSERT INTO api_key_rate_windows(key_id,window_start,request_count) VALUES(?,?,1)
-			ON CONFLICT(key_id,window_start) DO UPDATE SET request_count=request_count+1 WHERE request_count < ?`, key.ID, window, key.RateLimitRPM)
-		if err != nil {
-			return APIKey{}, err
+		if key.RateLimitRPM > 0 {
+			tx, err := s.db.Begin()
+			if err != nil {
+				return APIKey{}, err
+			}
+			defer tx.Rollback()
+			window := time.Now().UTC().Unix() / 60 * 60
+			r, err := tx.Exec(`INSERT INTO api_key_rate_windows(key_id,window_start,request_count) VALUES(?,?,1)
+				ON CONFLICT(key_id,window_start) DO UPDATE SET request_count=request_count+1 WHERE request_count < ?`, key.ID, window, key.RateLimitRPM)
+			if err != nil {
+				return APIKey{}, err
+			}
+			if n, err := r.RowsAffected(); err != nil {
+				return APIKey{}, err
+			} else if n == 0 {
+				return APIKey{}, ErrRateLimit
+			}
+			if err := tx.Commit(); err != nil {
+				return APIKey{}, err
+			}
 		}
-		if n, err := r.RowsAffected(); err != nil {
-			return APIKey{}, err
-		} else if n == 0 {
-			return APIKey{}, ErrRateLimit
-		}
-	}
-	updated, err := tx.Exec(`UPDATE api_keys SET last_used_at=CURRENT_TIMESTAMP WHERE id=? AND active=1 AND (expires_at IS NULL OR expires_at > ?)`, key.ID, time.Now().UTC())
-	if err != nil {
-		return APIKey{}, err
-	}
-	if count, err := updated.RowsAffected(); err != nil {
-		return APIKey{}, err
-	} else if count == 0 {
-		return APIKey{}, ErrInvalidAPIKey
-	}
-	if err := tx.Commit(); err != nil {
-		return APIKey{}, err
-	}
-	return key, nil
+		// Best-effort timestamp touch so transient DB contention never drops valid user traffic.
+		_, _ = s.db.Exec(`UPDATE api_keys SET last_used_at=CURRENT_TIMESTAMP WHERE id=?`, key.ID)
+		return key, nil
 }

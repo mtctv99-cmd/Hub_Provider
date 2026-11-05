@@ -69,11 +69,12 @@ func (s *TrafficStore) recordHourly(ctx context.Context, at time.Time, requestCo
 		ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO request_traffic_hourly(hour_start, request_count, duration_ms, tokens, audio_sec)
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		if _, err = tx.ExecContext(ctx, `INSERT INTO request_traffic_hourly(hour_start, request_count, duration_ms, tokens, audio_sec)
 		VALUES (?, ?, ?, ?, ?) ON CONFLICT(hour_start) DO UPDATE SET
 			request_count=request_count+excluded.request_count,
 			duration_ms=duration_ms+excluded.duration_ms,
