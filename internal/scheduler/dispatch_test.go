@@ -215,8 +215,8 @@ func TestDispatcherChatPerAttemptTimeoutAllowsFailover(t *testing.T) {
 	if resp.Content != "hello" {
 		t.Fatalf("unexpected fallback response: %q", resp.Content)
 	}
-	if elapsed >= 2500*time.Millisecond {
-		t.Fatalf("primary attempt ate the whole budget: %v", elapsed)
+	if elapsed >= 1500*time.Millisecond {
+		t.Fatalf("primary attempt exceeded its per-model timeout: %v", elapsed)
 	}
 }
 

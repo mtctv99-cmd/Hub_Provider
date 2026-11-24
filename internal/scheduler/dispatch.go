@@ -91,12 +91,18 @@ func (d *Dispatcher) chatWithFailover(ctx context.Context, req provider.ChatRequ
 		return provider.ChatResponse{}, fmt.Errorf("model failover cycle detected at %q", req.Model)
 	}
 	visited[req.Model] = true
-	resp, err := d.chatOnce(ctx, req)
+	spec, specOK := d.Models.Get(req.Model)
+	attemptCtx := ctx
+	cancelAttempt := func() {}
+	if specOK {
+		attemptCtx, cancelAttempt = context.WithTimeout(ctx, modelTimeout(spec))
+	}
+	resp, err := d.chatOnce(attemptCtx, req)
+	cancelAttempt()
 	if err == nil {
 		return resp, nil
 	}
-	spec, ok := d.Models.Get(req.Model)
-	if !ok || len(spec.FailoverTo) == 0 || !failoverEligible(err) {
+	if !specOK || len(spec.FailoverTo) == 0 || !failoverEligible(err) {
 		return provider.ChatResponse{}, err
 	}
 	// Budget for the whole turn is gone (deadline or client gone): trying a
