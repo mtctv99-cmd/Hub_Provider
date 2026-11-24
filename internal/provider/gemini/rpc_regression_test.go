@@ -290,3 +290,101 @@ func TestStreamChat_ToolChoiceRequiredFailsWhenNoCalls(t *testing.T) {
 		t.Fatal("expected error when required tool choice emitted no tool call")
 	}
 }
+
+// collectStream reads the whole stream and returns the joined content, the
+// joined reasoning and the number of chunks carrying reasoning.
+func collectStream(t *testing.T, ch <-chan provider.StreamChunk) (content, reasoning string, reasoningChunks int) {
+	t.Helper()
+	for c := range ch {
+		if c.Err != nil {
+			t.Fatalf("unexpected chunk err: %v", c.Err)
+		}
+		content += c.Content
+		reasoning += c.ReasoningContent
+		if c.ReasoningContent != "" {
+			reasoningChunks++
+		}
+	}
+	return content, reasoning, reasoningChunks
+}
+
+func TestChatSetsReasoningContentFromThinkingSlot(t *testing.T) {
+	srv := tokenHandlerRPC(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(append(thinkingFrame("Đáp án", "Bước 1 rồi bước 2"), '\n'))
+	})
+	defer srv.Close()
+	a := New(&http.Client{})
+	a.SetBaseURL(srv.URL)
+	resp, err := a.Chat(context.Background(), provider.ChatRequest{Model: "gemini-3.8-flash"}, nil)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if resp.Content != "Đáp án" || resp.ReasoningContent != "Bước 1 rồi bước 2" {
+		t.Fatalf("content=%q reasoning=%q", resp.Content, resp.ReasoningContent)
+	}
+}
+
+func TestStreamChatEmitsReasoningDeltaWhileTextStalls(t *testing.T) {
+	srv := tokenHandlerRPC(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(append(thinkingFrame("Đáp án", "think A"), '\n'))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		_, _ = w.Write(append(thinkingFrame("Đáp án", "think A more"), '\n'))
+	})
+	defer srv.Close()
+	a := New(&http.Client{})
+	a.SetBaseURL(srv.URL)
+	ch, err := a.StreamChat(context.Background(), provider.ChatRequest{Model: "gemini-3.8-flash"}, nil)
+	if err != nil {
+		t.Fatalf("StreamChat: %v", err)
+	}
+	content, reasoning, reasoningChunks := collectStream(t, ch)
+	if content != "Đáp án" {
+		t.Fatalf("content=%q", content)
+	}
+	if reasoning != "think A more" || reasoningChunks != 2 {
+		t.Fatalf("reasoning=%q chunks=%d (want suffix-only delta)", reasoning, reasoningChunks)
+	}
+}
+
+func TestStreamChatWithoutThinkingSlotEmitsNoReasoning(t *testing.T) {
+	srv := tokenHandlerRPC(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(append(thinkingFrame("hello", ""), '\n'))
+		_, _ = w.Write(append(thinkingFrame("hello world", ""), '\n'))
+	})
+	defer srv.Close()
+	a := New(&http.Client{})
+	a.SetBaseURL(srv.URL)
+	ch, err := a.StreamChat(context.Background(), provider.ChatRequest{Model: "gemini-3.8-flash"}, nil)
+	if err != nil {
+		t.Fatalf("StreamChat: %v", err)
+	}
+	content, _, reasoningChunks := collectStream(t, ch)
+	if content != "hello world" {
+		t.Fatalf("content=%q", content)
+	}
+	if reasoningChunks != 0 {
+		t.Fatalf("expected no reasoning chunks, got %d", reasoningChunks)
+	}
+}
+
+func TestStreamChatReplayedThoughtsAreNotRepeated(t *testing.T) {
+	// A snapshot that is not an extension of the previous one must not be
+	// replayed: the client would see the chain twice.
+	srv := tokenHandlerRPC(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(append(thinkingFrame("Đáp án", "abc"), '\n'))
+		_, _ = w.Write(append(thinkingFrame("Đáp án", "xyz"), '\n'))
+	})
+	defer srv.Close()
+	a := New(&http.Client{})
+	a.SetBaseURL(srv.URL)
+	ch, err := a.StreamChat(context.Background(), provider.ChatRequest{Model: "gemini-3.8-flash"}, nil)
+	if err != nil {
+		t.Fatalf("StreamChat: %v", err)
+	}
+	_, reasoning, _ := collectStream(t, ch)
+	if reasoning != "abc" {
+		t.Fatalf("reasoning=%q, want only the first snapshot", reasoning)
+	}
+}

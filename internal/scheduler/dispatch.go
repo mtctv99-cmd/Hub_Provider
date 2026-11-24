@@ -15,8 +15,11 @@ import (
 	"sever_provider/internal/provider/piper"
 	"sever_provider/internal/session"
 	"sever_provider/internal/settings"
+	"sever_provider/internal/tenant"
 	"sever_provider/internal/workerhub"
 )
+
+const imageAttemptTimeout = 45 * time.Second
 
 type CredentialSource interface {
 	List(ctx context.Context, domain string) ([]identity.Credential, error)
@@ -52,10 +55,31 @@ func providerModelRequest(req provider.ChatRequest, spec ModelSpec) provider.Cha
 	return req
 }
 
+// degradedErrorSkipThreshold is the consecutive-failure count after which a
+// DEGRADED credential is no longer tried while a healthy account is available.
+// Dead web sessions otherwise cost one upstream timeout per request.
+const degradedErrorSkipThreshold = 5
+
+// hasHealthyCredential reports whether at least one credential could serve a
+// request right now (healthy, no active cooldown).
+func hasHealthyCredential(creds []identity.Credential, now time.Time) bool {
+	for _, c := range creds {
+		if c.Status == identity.StatusHealthy && (c.CooldownUntil == nil || !now.Before(*c.CooldownUntil)) {
+			return true
+		}
+	}
+	return false
+}
+
 func (d *Dispatcher) Chat(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
-	ctx, cancel, unlock, err := d.chatContext(ctx, req)
+	// Non-stream turns may fail over to another model; give each one its budget.
+	attempts := 1
+	if spec, ok := d.Models.Get(req.Model); ok {
+		attempts += len(spec.FailoverTo)
+	}
+	ctx, cancel, unlock, err := d.chatContext(ctx, req, attempts)
 	if err != nil {
-		return provider.ChatResponse{}, err
+		return provider.ChatResponse{}, wrapDispatchError(ctx, err, req.Model, d.providerName(req.Model), "")
 	}
 	defer cancel()
 	defer unlock()
@@ -73,6 +97,11 @@ func (d *Dispatcher) chatWithFailover(ctx context.Context, req provider.ChatRequ
 	}
 	spec, ok := d.Models.Get(req.Model)
 	if !ok || len(spec.FailoverTo) == 0 || !failoverEligible(err) {
+		return provider.ChatResponse{}, err
+	}
+	// Budget for the whole turn is gone (deadline or client gone): trying a
+	// fallback model would only queue work no caller can receive.
+	if ctx.Err() != nil {
 		return provider.ChatResponse{}, err
 	}
 	for _, fallback := range spec.FailoverTo {
@@ -139,12 +168,20 @@ func (d *Dispatcher) chatOnce(ctx context.Context, req provider.ChatRequest) (pr
 	now := time.Now()
 	lastErr := error(ErrNoAvailableCredential)
 	skippedStatus, skippedBreaker := 0, 0
+	healthyAvailable := hasHealthyCredential(creds, now)
 	for _, cred := range creds {
 		cred = d.recoverCooldownIfExpired(ctx, cred, now)
-		if ctx.Err() != nil {
-			return provider.ChatResponse{}, ctx.Err()
+		if err := ctx.Err(); err != nil {
+			return provider.ChatResponse{}, wrapDispatchError(ctx, err, req.Model, spec.Provider, "")
 		}
 		if (cred.Status != identity.StatusHealthy && cred.Status != identity.StatusDegraded) || (cred.CooldownUntil != nil && now.Before(*cred.CooldownUntil)) {
+			skippedStatus++
+			continue
+		}
+		// A chronically failing account (expired cookie, dead session) otherwise
+		// burns a full upstream timeout on every request. Skip it while healthy
+		// accounts exist; it stays eligible when they are all busy or broken.
+		if !isBoundSession && healthyAvailable && cred.Status == identity.StatusDegraded && cred.ConsecutiveErrors >= degradedErrorSkipThreshold {
 			skippedStatus++
 			continue
 		}
@@ -187,7 +224,11 @@ func (d *Dispatcher) chatOnce(ctx context.Context, req provider.ChatRequest) (pr
 		// ponytail: closure wraps call + defer; upgrade to explicit tracker when span metrics added.
 		resp, callErr := func() (provider.ChatResponse, error) {
 			defer d.release(lease)
-			return adapter.Chat(ctx, providerModelRequest(req, spec), secret)
+			// Per-attempt deadline: a hanging credential must not eat the budget
+			// reserved for the next credential or the failover model.
+			attemptCtx, cancelAttempt := context.WithTimeout(ctx, modelTimeout(spec))
+			defer cancelAttempt()
+			return adapter.Chat(attemptCtx, providerModelRequest(req, spec), secret)
 		}()
 		// Block empty content before recording success or committing the
 		// session: an empty turn must not advance upstream continuity.
@@ -195,6 +236,7 @@ func (d *Dispatcher) chatOnce(ctx context.Context, req provider.ChatRequest) (pr
 			callErr = provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, "chat returned empty content with no tool calls")
 		}
 		if callErr != nil {
+			callErr = wrapDispatchError(ctx, callErr, req.Model, spec.Provider, cred.ID)
 			lastErr = callErr
 		}
 		d.recordAttempt(ctx, spec.Provider, cred.ID, callErr)
@@ -226,7 +268,7 @@ func (d *Dispatcher) chatGuest(ctx context.Context, req provider.ChatRequest, sp
 	}
 	resp, err := adapter.Chat(ctx, providerModelRequest(req, spec), nil)
 	if err != nil {
-		return provider.ChatResponse{}, err
+		return provider.ChatResponse{}, wrapDispatchError(ctx, err, req.Model, spec.Provider, "guest")
 	}
 	if strings.TrimSpace(resp.Content) == "" && len(resp.ToolCalls) == 0 && len(resp.ImageData) == 0 {
 		return provider.ChatResponse{}, provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, "guest model returned empty content with no tool calls")
@@ -260,12 +302,40 @@ func (d *Dispatcher) bindSession(sessionID, credentialID, providerName string, u
 	}
 	return d.Sessions.Commit(sessionID, credentialID, providerName, upstream)
 }
-func (d *Dispatcher) chatContext(ctx context.Context, req provider.ChatRequest) (context.Context, context.CancelFunc, func(), error) {
-	timeout := 120 * time.Second
-	if spec, ok := d.Models.Get(req.Model); ok && spec.TimeoutSec > 0 {
-		timeout = time.Duration(spec.TimeoutSec) * time.Second
+
+// chatAttemptTimeout is the per-attempt budget when a model does not set timeout_sec.
+const chatAttemptTimeout = 120 * time.Second
+
+// chatTotalBudgetCap keeps one non-stream turn below the server WriteTimeout
+// (5m, cmd/server/main.go), even when failover models multiply the budget.
+const chatTotalBudgetCap = 4 * time.Minute
+
+func modelTimeout(spec ModelSpec) time.Duration {
+	if spec.TimeoutSec > 0 {
+		return time.Duration(spec.TimeoutSec) * time.Second
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	return chatAttemptTimeout
+}
+
+// chatContext bounds the whole turn: one attempt budget per model the request
+// may fail over to, capped so a hanging credential still leaves room to retry.
+func (d *Dispatcher) chatContext(ctx context.Context, req provider.ChatRequest, attempts int) (context.Context, context.CancelFunc, func(), error) {
+	timeout := chatAttemptTimeout
+	if spec, ok := d.Models.Get(req.Model); ok {
+		timeout = modelTimeout(spec)
+	}
+	if attempts < 1 {
+		attempts = 1
+	}
+	total := timeout * time.Duration(attempts)
+	if total > chatTotalBudgetCap {
+		total = chatTotalBudgetCap
+		// Never shrink a single attempt below its own timeout.
+		if total < timeout {
+			total = timeout
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, total)
 	unlock := func() {}
 	if d.Sessions != nil {
 		var err error
@@ -278,46 +348,106 @@ func (d *Dispatcher) chatContext(ctx context.Context, req provider.ChatRequest) 
 	return ctx, cancel, unlock, nil
 }
 
-// sessionNSKey is the context key carrying the caller's API key for session
-// namespacing (P1-5). Set it in the gateway before entering the scheduler:
-// ctx = context.WithValue(ctx, scheduler.SessionNSKey, rawAPIKey).
+// sessionNSKey is the legacy context key carrying the caller's API key for
+// session namespacing (P1-5). New callers should use tenant.WithID instead;
+// both are hashed before use so raw keys never reach the session store.
 type sessionNSKey struct{}
 
 // SessionNSKey advertises the context key without exporting the type.
 var SessionNSKey = sessionNSKey{}
 
-// namespaceSession prefixes the raw session ID with a hash of the caller API
-// key, so two keys sharing one ID never map to the same upstream conversation.
-// No key in context means no namespace (legacy single-key deployments).
-// Idempotent: an already-namespaced ID is returned unchanged, so chatContext
-// and chatOnce/streamChat can each apply it safely.
-// ponytail: 8-byte sha256 prefix only; upgrade to full key id when the gateway
-// passes one — raw keys never leave ctx, only the hash is stored.
+// requestIDKey carries the gateway X-Request-ID into dispatch diagnostics.
+type requestIDKey struct{}
+
+// WithRequestID records the request identifier used in cancellation
+// diagnostics. The gateway should attach X-Request-ID before calling the
+// dispatcher; an unset ID simply omits the field.
+func WithRequestID(ctx context.Context, id string) context.Context {
+	id = strings.TrimSpace(id)
+	if ctx == nil || id == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, requestIDKey{}, id)
+}
+
+// RequestID returns the request identifier carried by ctx, if any.
+func RequestID(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	id, _ := ctx.Value(requestIDKey{}).(string)
+	return id
+}
+
+// sessionNamespace resolves the tenant identity that namespaces session IDs:
+// the authenticated tenant first, then the legacy SessionNSKey value.
+func sessionNamespace(ctx context.Context) string {
+	if id := strings.TrimSpace(tenant.ID(ctx)); id != "" {
+		return id
+	}
+	key, _ := ctx.Value(SessionNSKey).(string)
+	return strings.TrimSpace(key)
+}
+
+// namespaceSession prefixes the raw session ID with a hash of the authenticated
+// tenant, so two API keys sharing one X-Session-ID never map to the same
+// upstream conversation or credential affinity. It is applied by chat,
+// streaming, image, and video dispatch before any session lookup/commit.
+//
+// Idempotent for our own namespace (chatContext and chatOnce/streamChat both
+// apply it). A 16-hex prefix supplied by the client is NOT trusted: it belongs
+// to another tenant at best, so it is prefixed again instead of accepted.
+// No tenant/key in context means no namespace (legacy single-key deployments).
 func namespaceSession(ctx context.Context, sessionID string) string {
 	if strings.TrimSpace(sessionID) == "" {
 		return sessionID
 	}
-	if i := strings.Index(sessionID, ":"); i == 16 && isHexPrefix(sessionID[:16]) {
-		return sessionID
-	}
-	key, _ := ctx.Value(SessionNSKey).(string)
-	key = strings.TrimSpace(key)
+	key := sessionNamespace(ctx)
 	if key == "" {
 		return sessionID
 	}
 	sum := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(sum[:8]) + ":" + sessionID
+	prefix := hex.EncodeToString(sum[:8])
+	if strings.HasPrefix(sessionID, prefix+":") {
+		return sessionID
+	}
+	return prefix + ":" + sessionID
 }
 
-func isHexPrefix(s string) bool {
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
-			return false
-		}
+// wrapDispatchError adds model/provider/credential/request-id context to
+// client cancellation errors. It wraps with %w so errors.Is(context.Canceled)
+// still holds and the gateway keeps mapping the request to 499. Non-cancellation
+// errors are returned unchanged (the caller's aggregation already names them).
+func wrapDispatchError(ctx context.Context, err error, model, providerName, credentialID string) error {
+	if err == nil || !errors.Is(err, context.Canceled) {
+		return err
 	}
-	return len(s) == 16
+	fields := []string{"dispatch canceled"}
+	if model != "" {
+		fields = append(fields, "model="+model)
+	}
+	if providerName != "" {
+		fields = append(fields, "provider="+providerName)
+	}
+	if credentialID != "" {
+		fields = append(fields, "credential="+credentialID)
+	}
+	if id := RequestID(ctx); id != "" {
+		fields = append(fields, "request_id="+id)
+	}
+	return fmt.Errorf("%s: %w", strings.Join(fields, " "), err)
 }
+
+func (d *Dispatcher) providerName(model string) string {
+	if d == nil || d.Models == nil {
+		return ""
+	}
+	if spec, ok := d.Models.Get(model); ok {
+		return spec.Provider
+	}
+	return ""
+}
+
 func (d *Dispatcher) chatCredentials(creds []identity.Credential, id, providerName string) ([]identity.Credential, error) {
 	if d.Sessions != nil {
 		if b, ok := d.Sessions.Get(id); ok {
@@ -336,9 +466,9 @@ func (d *Dispatcher) chatCredentials(creds []identity.Credential, id, providerNa
 }
 
 func (d *Dispatcher) StreamChat(ctx context.Context, req provider.ChatRequest) (<-chan provider.StreamChunk, error) {
-	ctx, cancel, unlock, err := d.chatContext(ctx, req)
+	ctx, cancel, unlock, err := d.chatContext(ctx, req, 1)
 	if err != nil {
-		return nil, err
+		return nil, wrapDispatchError(ctx, err, req.Model, d.providerName(req.Model), "")
 	}
 	stream, err := d.streamChat(ctx, req)
 	if err != nil {
@@ -417,12 +547,17 @@ func (d *Dispatcher) streamChat(ctx context.Context, req provider.ChatRequest) (
 	now := time.Now()
 	lastErr := error(ErrNoAvailableCredential)
 	skippedStatus, skippedBreaker := 0, 0
+	healthyAvailable := hasHealthyCredential(creds, now)
 	for _, cred := range creds {
 		cred = d.recoverCooldownIfExpired(ctx, cred, now)
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+		if err := ctx.Err(); err != nil {
+			return nil, wrapDispatchError(ctx, err, req.Model, spec.Provider, "")
 		}
 		if (cred.Status != identity.StatusHealthy && cred.Status != identity.StatusDegraded) || (cred.CooldownUntil != nil && now.Before(*cred.CooldownUntil)) {
+			skippedStatus++
+			continue
+		}
+		if !isBoundSession && healthyAvailable && cred.Status == identity.StatusDegraded && cred.ConsecutiveErrors >= degradedErrorSkipThreshold {
 			skippedStatus++
 			continue
 		}
@@ -464,6 +599,7 @@ func (d *Dispatcher) streamChat(ctx context.Context, req provider.ChatRequest) (
 		}
 		stream, callErr := adapter.StreamChat(ctx, providerModelRequest(req, spec), secret)
 		if callErr != nil {
+			callErr = wrapDispatchError(ctx, callErr, req.Model, spec.Provider, cred.ID)
 			lastErr = callErr
 			d.release(lease)
 			d.recordAttempt(ctx, spec.Provider, cred.ID, callErr)
@@ -473,6 +609,7 @@ func (d *Dispatcher) streamChat(ctx context.Context, req provider.ChatRequest) (
 		provName := spec.Provider
 		sessionID := req.SessionID
 		return wrapRelease(stream, d.Leases, lease.ID, ctx, func(streamErr error, upstream provider.UpstreamState) error {
+			streamErr = wrapDispatchError(ctx, streamErr, req.Model, provName, credID)
 			d.recordAttempt(ctx, provName, credID, streamErr)
 			if streamErr == nil {
 				return d.bindSession(sessionID, credID, provName, upstream)
@@ -498,10 +635,11 @@ func (d *Dispatcher) streamGuest(ctx context.Context, req provider.ChatRequest, 
 	}
 	stream, err := adapter.StreamChat(ctx, providerModelRequest(req, spec), nil)
 	if err != nil {
-		return nil, err
+		return nil, wrapDispatchError(ctx, err, req.Model, spec.Provider, "guest")
 	}
 	sessionID := req.SessionID
 	return wrapRelease(stream, d.Leases, "", ctx, func(streamErr error, upstream provider.UpstreamState) error {
+		streamErr = wrapDispatchError(ctx, streamErr, req.Model, spec.Provider, "guest")
 		if streamErr == nil && d.Sessions != nil && strings.TrimSpace(sessionID) != "" && !upstream.Empty() {
 			return d.bindSession(sessionID, "guest", spec.Provider, upstream)
 		}
@@ -543,6 +681,21 @@ func wrapRelease(in <-chan provider.StreamChunk, leases *LeaseManager, id string
 			select {
 			case <-ctx.Done():
 				finish(ctx.Err())
+				// Keep draining so an adapter blocked on an unbuffered send can
+				// observe cancellation and close its response body instead of
+				// leaking a goroutine/connection.
+				go func() {
+					for {
+						select {
+						case _, ok := <-in:
+							if !ok {
+								return
+							}
+						case <-time.After(30 * time.Second):
+							return
+						}
+					}
+				}()
 				return
 			case chunk, ok := <-in:
 				if !ok {
@@ -598,6 +751,9 @@ func (d *Dispatcher) release(lease Lease) {
 }
 
 func (d *Dispatcher) Image(ctx context.Context, req provider.ImageRequest) (provider.ImageResponse, error) {
+	// Tenant namespace before any affinity lookup/commit (H3): two API keys
+	// sharing an X-Session-ID must not continue each other's image session.
+	req.SessionID = namespaceSession(ctx, req.SessionID)
 	spec, ok := d.Models.Get(req.Model)
 	if !ok {
 		return provider.ImageResponse{}, fmt.Errorf("model %q is not configured", req.Model)
@@ -618,6 +774,7 @@ func (d *Dispatcher) Image(ctx context.Context, req provider.ImageRequest) (prov
 		return provider.ImageResponse{}, err
 	}
 	creds = d.orderedCredentials(creds, req.SessionID)
+	healthyAvailable := hasHealthyCredential(creds, time.Now())
 	// Continue the session's Gemini conversation so repeated image prompts keep
 	// the same style instead of starting a fresh one every time.
 	if strings.TrimSpace(req.SessionID) != "" && d.Sessions != nil {
@@ -632,8 +789,17 @@ func (d *Dispatcher) Image(ctx context.Context, req provider.ImageRequest) (prov
 	now := time.Now()
 	lastErr := error(nil)
 	for _, cred := range creds {
-		cred = credentialAfterCooldown(cred, now)
+		cred = d.recoverCooldownIfExpired(ctx, cred, now)
 		if (cred.Status != identity.StatusHealthy && cred.Status != identity.StatusDegraded) || (cred.CooldownUntil != nil && now.Before(*cred.CooldownUntil)) {
+			if lastErr == nil {
+				lastErr = fmt.Errorf("credential %s unavailable (status=%s)", cred.ID, cred.Status)
+			}
+			continue
+		}
+		if healthyAvailable && cred.Status == identity.StatusDegraded && cred.ConsecutiveErrors >= degradedErrorSkipThreshold {
+			if lastErr == nil {
+				lastErr = fmt.Errorf("credential %s skipped (repeat failures)", cred.ID)
+			}
 			continue
 		}
 		if d.Breakers != nil {
@@ -649,16 +815,25 @@ func (d *Dispatcher) Image(ctx context.Context, req provider.ImageRequest) (prov
 		}
 		lease, leaseErr := d.acquireCredential(ctx, cred.ID, cred.Domain, req.Model, spec.TimeoutSec, false)
 		if leaseErr != nil {
+			if lastErr == nil {
+				lastErr = leaseErr
+			}
 			continue
 		}
 		secret, secretErr := d.Credentials.ReadSecret(ctx, cred.ID)
 		if secretErr != nil {
 			d.release(lease)
 			d.recordAttempt(ctx, spec.Provider, cred.ID, fmt.Errorf("credential secret: %w", secretErr))
+			if lastErr == nil {
+				lastErr = fmt.Errorf("credential secret unavailable")
+			}
 			continue
 		}
-		result, callErr := adapter.Image(ctx, req, secret)
+		attemptCtx, cancel := context.WithTimeout(ctx, imageAttemptTimeout)
+		result, callErr := adapter.Image(attemptCtx, req, secret)
+		cancel()
 		d.release(lease)
+		callErr = wrapDispatchError(ctx, callErr, req.Model, spec.Provider, cred.ID)
 		d.recordAttempt(ctx, spec.Provider, cred.ID, callErr)
 		if callErr == nil {
 			// Same affinity chat keeps: credential plus the upstream turn, so the
@@ -677,6 +852,8 @@ func (d *Dispatcher) Image(ctx context.Context, req provider.ImageRequest) (prov
 }
 
 func (d *Dispatcher) Video(ctx context.Context, req provider.VideoRequest) (provider.VideoResponse, error) {
+	// Tenant namespace before credential affinity is resolved (H3).
+	req.SessionID = namespaceSession(ctx, req.SessionID)
 	spec, ok := d.Models.Get(req.Model)
 	if !ok {
 		return provider.VideoResponse{}, fmt.Errorf("model %q is not configured", req.Model)
@@ -696,7 +873,7 @@ func (d *Dispatcher) Video(ctx context.Context, req provider.VideoRequest) (prov
 	now := time.Now()
 	lastErr := error(nil)
 	for _, cred := range creds {
-		cred = credentialAfterCooldown(cred, now)
+		cred = d.recoverCooldownIfExpired(ctx, cred, now)
 		if (cred.Status != identity.StatusHealthy && cred.Status != identity.StatusDegraded) || (cred.CooldownUntil != nil && now.Before(*cred.CooldownUntil)) {
 			continue
 		}
@@ -723,6 +900,7 @@ func (d *Dispatcher) Video(ctx context.Context, req provider.VideoRequest) (prov
 		}
 		result, callErr := adapter.Video(ctx, req, secret)
 		d.release(lease)
+		callErr = wrapDispatchError(ctx, callErr, req.Model, spec.Provider, cred.ID)
 		d.recordAttempt(ctx, spec.Provider, cred.ID, callErr)
 		if callErr == nil {
 			return result, nil
@@ -836,7 +1014,7 @@ func (d *Dispatcher) Speech(ctx context.Context, req provider.SpeechRequest) ([]
 	now := time.Now()
 	lastErr := ErrNoAvailableCredential
 	for _, cred := range creds {
-		cred = credentialAfterCooldown(cred, now)
+		cred = d.recoverCooldownIfExpired(ctx, cred, now)
 		if (cred.Status != identity.StatusHealthy && cred.Status != identity.StatusDegraded) || (cred.CooldownUntil != nil && now.Before(*cred.CooldownUntil)) {
 			continue
 		}
@@ -939,13 +1117,10 @@ func (d *Dispatcher) orderedCredentials(creds []identity.Credential, sessionID s
 }
 
 func (d *Dispatcher) recordAttempt(ctx context.Context, providerName, credentialID string, err error) {
-	// Client-initiated cancellations are not provider failures.
-	if errors.Is(err, context.Canceled) {
-		return
-	}
-	// Copilot image sanitization rejects the caller's attachment, not the
-	// account; charging it would open account breakers and stall text chat.
-	if err != nil && strings.Contains(strings.ToLower(err.Error()), "imagesanitization") {
+	// Client-caused failures are not credential faults. Charging them opens
+	// account/provider breakers (3/5 failures per minute) and parks a healthy
+	// credential in cooldown for 60s, so classify before touching either.
+	if isClientCausedError(err) {
 		return
 	}
 
@@ -987,8 +1162,13 @@ func failoverEligible(err error) bool {
 	if errors.Is(err, ErrNoAvailableCredential) || errors.Is(err, provider.ErrProviderUnavailable) || errors.Is(err, provider.ErrNoCapacity) || errors.Is(err, provider.ErrEmptyResponse) {
 		return true
 	}
+	// A per-attempt timeout leaves the turn budget alive, so the next model can
+	// still answer; without this the primary hangs and the caller gets a 504.
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "not registered") || strings.Contains(msg, "provider unavailable") || strings.Contains(msg, "no available credential") || strings.Contains(msg, "empty_response") || strings.Contains(msg, "empty upstream response")
+	return strings.Contains(msg, "not registered") || strings.Contains(msg, "provider unavailable") || strings.Contains(msg, "no available credential") || strings.Contains(msg, "empty_response") || strings.Contains(msg, "empty upstream response") || strings.Contains(msg, "timeout") || strings.Contains(msg, "timed out") || strings.Contains(msg, "deadline exceeded")
 }
 
 func classifyProviderError(err error, now time.Time) (identity.CredentialStatus, *time.Time) {
@@ -1005,8 +1185,18 @@ func classifyProviderError(err error, now time.Time) (identity.CredentialStatus,
 	}
 	msg := strings.ToLower(err.Error())
 	switch {
-	case strings.Contains(msg, "429") || strings.Contains(msg, "rate") || strings.Contains(msg, "quota"):
+	// Specific rate-limit phrases only. A bare "rate" substring matches
+	// "generated", which turned image parser failures into 60s credential
+	// cooldowns and provider breaker trips (H4).
+	case containsAny(msg, "429", "rate limit", "rate_limit", "ratelimit", "too many requests", "quota"):
 		cooldown := now.Add(60 * time.Second)
+		return identity.StatusRateLimited, &cooldown
+	// Copilot quota window: the daily chat limit does not clear in a minute.
+	case containsAny(msg, "outofcredits", "out_of_credits", "out of credits", "daily chat limit"):
+		cooldown := now.Add(15 * time.Minute)
+		return identity.StatusRateLimited, &cooldown
+	case containsAny(msg, "throttled", "throttle"):
+		cooldown := now.Add(time.Minute)
 		return identity.StatusRateLimited, &cooldown
 	case strings.Contains(msg, "cooldown"):
 		cooldown := now.Add(60 * time.Second)
@@ -1017,6 +1207,42 @@ func classifyProviderError(err error, now time.Time) (identity.CredentialStatus,
 	default:
 		return identity.StatusDegraded, nil
 	}
+}
+
+// isClientCausedError reports failures caused by the request or caller
+// interaction rather than the credential/upstream health. These must not be
+// charged to account or provider breakers (M16) and must not trigger cooldowns.
+func isClientCausedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	// A turn with no content/tool calls is a caller-visible empty answer, not
+	// evidence that the account is dead.
+	if errors.Is(err, provider.ErrEmptyResponse) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	if containsAny(msg, "empty_response", "empty upstream response", "imagesanitization", "geminiimagecapabilityunavailable") {
+		return true
+	}
+	// tool_choice is a caller constraint; the model ignoring it is not an
+	// account failure.
+	if strings.Contains(msg, "tool_choice") && (strings.Contains(msg, "returned none") || strings.Contains(msg, "no tool call")) {
+		return true
+	}
+	return false
+}
+
+func containsAny(s string, substrings ...string) bool {
+	for _, sub := range substrings {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Dispatcher) acquireCredential(ctx context.Context, credentialID, domain, model string, timeout int, wait bool) (Lease, error) {

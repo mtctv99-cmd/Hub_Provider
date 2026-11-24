@@ -20,7 +20,20 @@ type Supervisor struct {
 	Files    *filestore.Store
 	Sessions *session.Manager
 	Interval time.Duration
+	// StaleAfter is the stale window for chat/TTS/LLM jobs. Zero uses 10m.
+	StaleAfter time.Duration
+	// VideoTimeout mirrors Runner.VideoTimeout. Video jobs are only reset
+	// after VideoTimeout+VideoStaleBuffer (with a 60m floor), so a healthy
+	// 45m generation is never requeued while it is still running.
+	VideoTimeout time.Duration
+	// VideoStaleAfter overrides the computed video stale window when > 0.
+	VideoStaleAfter time.Duration
 }
+
+const (
+	defaultStaleAfter      = 10 * time.Minute
+	defaultVideoStaleAfter = 60 * time.Minute
+)
 
 func (s *Supervisor) Start(ctx context.Context) {
 	interval := s.Interval
@@ -41,11 +54,38 @@ func (s *Supervisor) Start(ctx context.Context) {
 	}()
 }
 
+// staleWindows returns the non-video and video stale thresholds. They are split
+// per kind because a video generation legitimately runs for up to
+// VideoTimeout, while a chat job stuck for 10m is abandoned.
+func (s *Supervisor) staleWindows() (time.Duration, time.Duration) {
+	nonVideo := s.StaleAfter
+	if nonVideo <= 0 {
+		nonVideo = defaultStaleAfter
+	}
+	video := s.VideoStaleAfter
+	if video <= 0 {
+		videoTimeout := s.VideoTimeout
+		if videoTimeout <= 0 {
+			videoTimeout = DefaultVideoTimeout
+		}
+		video = videoTimeout + VideoStaleBuffer
+		if video < defaultVideoStaleAfter {
+			video = defaultVideoStaleAfter
+		}
+	}
+	return nonVideo, video
+}
+
 func (s *Supervisor) RunOnce(ctx context.Context) {
 	if s.Jobs != nil {
-		// Reset jobs that have been locked for more than 10 minutes without completion
-		if n, err := s.Jobs.ResetStale(ctx, 10*time.Minute); err == nil && n > 0 {
+		nonVideo, video := s.staleWindows()
+		// Abandoned chat/TTS jobs keep the short window; video jobs are reset
+		// only once their own generator timeout has passed.
+		if n, err := s.Jobs.ResetStaleExceptType(ctx, nonVideo, "video"); err == nil && n > 0 {
 			log.Printf("[SUPERVISOR] reset %d stale processing jobs", n)
+		}
+		if n, err := s.Jobs.ResetStaleType(ctx, video, "video"); err == nil && n > 0 {
+			log.Printf("[SUPERVISOR] reset %d stale video processing jobs (window=%s)", n, video)
 		}
 		// Cleanup completed/failed jobs older than 7 days
 		if n, err := s.Jobs.CleanupOld(ctx, 7*24*time.Hour); err == nil && n > 0 {

@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"errors"
+	"log"
+	"net"
 	"net/http"
 	"path"
 	"strconv"
@@ -19,6 +21,53 @@ func (h *Handler) SetAudit(audit *admin.AuditLogger)                 { h.AuditLo
 func (h *Handler) SetColabSupervisor(cs *colabsupervisor.Supervisor) { h.ColabSupervisor = cs }
 func (h *Handler) SetSessions(s *session.Manager)                    { h.Sessions = s }
 
+func (h *Handler) adminLoginLimiter() *admin.LoginLimiter {
+	h.loginLimiterOnce.Do(func() {
+		if h.AdminLoginLimiter == nil {
+			h.AdminLoginLimiter = admin.NewLoginLimiter()
+		}
+	})
+	return h.AdminLoginLimiter
+}
+
+// requestRemoteIP returns the direct peer address. X-Forwarded-For is
+// deliberately not trusted: the login limiter must not be bypassable by a
+// client-supplied header.
+func requestRemoteIP(r *http.Request) string {
+	if r == nil {
+		return "unknown"
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil {
+		host = strings.TrimSpace(r.RemoteAddr)
+	}
+	if host == "" {
+		return "unknown"
+	}
+	return host
+}
+
+// adminCookieSecure marks the admin cookie Secure when the connection is TLS or
+// when a trusted (loopback/private network) reverse proxy terminated TLS.
+func adminCookieSecure(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if r.TLS != nil {
+		return true
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil {
+		host = strings.TrimSpace(r.RemoteAddr)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !(ip.IsLoopback() || ip.IsPrivate()) {
+		return false
+	}
+	proto := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0])
+	return strings.EqualFold(proto, "https")
+}
+
 func (h *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	if h.AdminAuth == nil || !h.AdminAuth.Configured() {
 		writeError(w, http.StatusNotImplemented, "admin authentication is not configured", "server_error", "admin_auth_unavailable")
@@ -26,6 +75,12 @@ func (h *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	}
 	if !h.AdminAuth.IsAuthenticated(r) {
 		writeError(w, http.StatusUnauthorized, "admin authentication required", "authentication_error", "admin_auth_required")
+		return false
+	}
+	// First login (or a default password replaced from env) must be resolved
+	// before any other admin endpoint is reachable.
+	if h.AdminAuth.FirstLoginPending() && path.Clean(r.URL.Path) != "/admin/api/change-password" {
+		writeError(w, http.StatusForbidden, "password change required", "authentication_error", "password_change_required")
 		return false
 	}
 	return true
@@ -40,6 +95,17 @@ func (h *Handler) AdminLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 501, "admin authentication is not configured", "server_error", "admin_auth_unavailable")
 		return
 	}
+	limiter := h.adminLoginLimiter()
+	remoteIP := requestRemoteIP(r)
+	if wait := limiter.BlockedFor(remoteIP); wait > 0 {
+		retryAfter := int((wait + time.Second - 1) / time.Second)
+		if retryAfter < 1 {
+			retryAfter = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		writeError(w, http.StatusTooManyRequests, "too many failed login attempts; try again later", "authentication_error", "login_rate_limited")
+		return
+	}
 	var req struct {
 		Password string `json:"password"`
 	}
@@ -48,10 +114,13 @@ func (h *Handler) AdminLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	token, err := h.AdminAuth.Login(req.Password)
 	if err != nil {
+		limiter.RecordFailure(remoteIP)
+		log.Printf("[ADMIN] failed login from %s", remoteIP)
 		writeError(w, 401, "invalid admin credentials", "authentication_error", "invalid_credentials")
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: admin.CookieName, Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil, MaxAge: 86400})
+	limiter.RecordSuccess(remoteIP)
+	http.SetCookie(w, &http.Cookie{Name: admin.CookieName, Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: adminCookieSecure(r), MaxAge: 86400})
 	writeJSON(w, 200, map[string]any{"authenticated": true, "first_login": h.AdminAuth.FirstLoginPending()})
 }
 
@@ -63,7 +132,7 @@ func (h *Handler) AdminLogout(w http.ResponseWriter, r *http.Request) {
 	if h.AdminAuth != nil {
 		h.AdminAuth.Logout(h.AdminAuth.TokenFromRequest(r))
 	}
-	http.SetCookie(w, &http.Cookie{Name: admin.CookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, &http.Cookie{Name: admin.CookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: adminCookieSecure(r)})
 	writeJSON(w, 200, map[string]any{"authenticated": false})
 }
 

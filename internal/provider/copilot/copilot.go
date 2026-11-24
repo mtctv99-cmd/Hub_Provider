@@ -263,7 +263,7 @@ func (a *Adapter) Chat(ctx context.Context, req provider.ChatRequest, credential
 	var toolCalls []provider.ToolCall
 	finishReason := "stop"
 	if len(req.Tools) > 0 && req.ToolChoice != "none" {
-		cleanContent, toolCalls = provider.ParseToolCalls(full)
+		cleanContent, toolCalls = provider.ParseToolCallsForTools(full, req.Tools)
 		if len(toolCalls) > 0 {
 			finishReason = "tool_calls"
 		}
@@ -321,7 +321,7 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, cred
 			out <- provider.StreamChunk{Err: err}
 			return
 		}
-		cleanText, toolCalls := provider.ParseToolCalls(buf.String())
+		cleanText, toolCalls := provider.ParseToolCallsForTools(buf.String(), req.Tools)
 		finishReason := "stop"
 		if len(toolCalls) > 0 {
 			finishReason = "tool_calls"
@@ -768,23 +768,66 @@ func isSuccessResult(value string) bool {
 	return strings.EqualFold(strings.TrimSpace(value), "Success") || value == ""
 }
 
+// Copilot quota/throttle rejection kinds and their default cooldowns. The
+// daily chat limit does not clear in a minute, while throttling usually does.
+const (
+	LimitKindOutOfCredits = "OutOfCredits"
+	LimitKindThrottled    = "Throttled"
+
+	OutOfCreditsCooldown = 15 * time.Minute
+	ThrottleCooldown     = time.Minute
+)
+
+// LimitError is a retryable Copilot quota or throttle rejection. RetryAfter
+// lets the scheduler park the credential with a typed cooldown and rate-limit
+// status instead of marking the whole provider degraded (M1).
+type LimitError struct {
+	Kind   string
+	Detail string
+	Until  time.Time
+}
+
+func (e *LimitError) Error() string {
+	if e == nil {
+		return "copilot upstream limit"
+	}
+	kind := "copilot upstream throttled request"
+	if e.Kind == LimitKindOutOfCredits {
+		kind = "copilot upstream out of credits"
+	}
+	if e.Detail != "" {
+		return fmt.Sprintf("%s (%s): %s", kind, e.Kind, e.Detail)
+	}
+	return fmt.Sprintf("%s (%s)", kind, e.Kind)
+}
+
+// RetryAfter reports when the quota/throttle window is expected to clear.
+func (e *LimitError) RetryAfter() time.Time {
+	if e == nil {
+		return time.Time{}
+	}
+	return e.Until
+}
+
 func terminalError(value, message string) error {
 	if value == "" {
 		return provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, "copilot terminal frame had no result value")
 	}
 	kind := "copilot upstream rejected request"
+	capped := message
+	if len(capped) > 300 {
+		capped = capped[:300]
+	}
 	lower := strings.ToLower(value)
 	switch {
+	case strings.Contains(lower, "outofcredits") || strings.Contains(lower, "out_of_credits") || strings.Contains(lower, "out of credits"):
+		return &LimitError{Kind: LimitKindOutOfCredits, Detail: capped, Until: time.Now().Add(OutOfCreditsCooldown)}
 	case strings.Contains(lower, "throttl") || strings.Contains(lower, "ratelimit") || strings.Contains(lower, "429"):
-		kind = "copilot upstream throttled request"
+		return &LimitError{Kind: LimitKindThrottled, Detail: capped, Until: time.Now().Add(ThrottleCooldown)}
 	case strings.Contains(lower, "invalidrequest") || strings.Contains(lower, "invalid_request"):
 		kind = "copilot upstream rejected continuation"
 	}
-	if message != "" {
-		capped := message
-		if len(capped) > 300 {
-			capped = capped[:300]
-		}
+	if capped != "" {
 		return fmt.Errorf("%s (%s): %s", kind, value, capped)
 	}
 	return fmt.Errorf("%s (%s)", kind, value)

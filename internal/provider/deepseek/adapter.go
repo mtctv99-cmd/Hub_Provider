@@ -290,7 +290,7 @@ func (a *Adapter) Chat(ctx context.Context, req provider.ChatRequest, credential
 	finishReason := "stop"
 
 	if len(req.Tools) > 0 && req.ToolChoice != "none" {
-		cleanContent, toolCalls = provider.ParseToolCalls(fullContent)
+		cleanContent, toolCalls = provider.ParseToolCallsForTools(fullContent, req.Tools)
 		if len(toolCalls) > 0 {
 			finishReason = "tool_calls"
 		}
@@ -420,7 +420,7 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, cred
 		}
 
 		fullText := contentBuf.String()
-		cleanText, toolCalls := provider.ParseToolCalls(fullText)
+		cleanText, toolCalls := provider.ParseToolCallsForTools(fullText, req.Tools)
 
 		if strings.TrimSpace(cleanText) == "" && len(toolCalls) == 0 {
 			emptyErr := provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, "deepseek tool stream ended without content or tool calls")

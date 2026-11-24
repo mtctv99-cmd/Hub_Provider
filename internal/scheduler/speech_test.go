@@ -14,6 +14,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	_ "modernc.org/sqlite"
+	"sever_provider/internal/identity"
 	"sever_provider/internal/provider"
 	"sever_provider/internal/provider/piper"
 	"sever_provider/internal/settings"
@@ -87,6 +88,38 @@ func TestDispatcherSpeechDoesNotUseAbsentLocalPiper(t *testing.T) {
 	_, _, err := d.Speech(context.Background(), provider.SpeechRequest{Model: "piper:missing", Input: "hi", Voice: "missing"})
 	if err == nil || !strings.Contains(err.Error(), "not available locally") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+// speechOKAdapter trả audio giả để test đường speech không cần worker.
+type speechOKAdapter struct{ countAdapter }
+
+func (a *speechOKAdapter) Speech(context.Context, provider.SpeechRequest, []byte) ([]byte, string, error) {
+	return []byte("RIFF"), "audio/wav", nil
+}
+
+func TestSpeechRecoversExpiredCooldown(t *testing.T) {
+	models := NewModelRegistry()
+	if err := models.Register(ModelSpec{ID: "speech-model", Provider: "test", Capabilities: []provider.Capability{provider.CapabilitySpeech}}); err != nil {
+		t.Fatal(err)
+	}
+	until := time.Now().Add(-time.Second)
+	source := &trackingSource{creds: []identity.Credential{{
+		ID:            "c-voice",
+		Domain:        "test",
+		Status:        identity.StatusRateLimited,
+		CooldownUntil: &until,
+	}}}
+	d := &Dispatcher{Models: models, Credentials: source, Adapters: singleRegistry{&speechOKAdapter{}}, Breakers: NewBreakerRegistry(), Leases: NewLeaseManager()}
+	audio, mime, err := d.Speech(context.Background(), provider.SpeechRequest{Model: "speech-model", Input: "hi"})
+	if err != nil {
+		t.Fatalf("Speech failed: %v", err)
+	}
+	if string(audio) != "RIFF" || mime != "audio/wav" {
+		t.Fatalf("audio=%q mime=%q", audio, mime)
+	}
+	if len(source.statusSets) == 0 || source.statusSets[0].ID != "c-voice" || source.statusSets[0].Status != identity.StatusHealthy || source.statusSets[0].CooldownUntil != nil {
+		t.Fatalf("expected cooldown recovery persisted before call, got %+v", source.statusSets)
 	}
 }
 

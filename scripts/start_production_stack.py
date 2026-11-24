@@ -11,11 +11,11 @@ env = os.environ.copy()
 env["PORT"] = "18080"
 env["SERVER_PORT"] = "18080"
 env["DB_PATH"] = "data/local-smoke.db"
-env["COLAB_WORKER_KEY"] = "omni-secret-key-123"
-env["WORKER_AUTH_TOKEN"] = "omni-secret-key-123"
+env["COLAB_WORKER_KEY"] = ( __import__("os").environ.get("WORKER_AUTH_TOKEN") or __import__("sys").exit("set WORKER_AUTH_TOKEN in the environment") )
+env["WORKER_AUTH_TOKEN"] = ( __import__("os").environ.get("WORKER_AUTH_TOKEN") or __import__("sys").exit("set WORKER_AUTH_TOKEN in the environment") )
 env["PIPER_MODELS_DIR"] = "models"
 env["PIPER_BIN"] = r"C:\Users\MaiThanhChu\AppData\Local\hermes\hermes-agent\venv\Scripts\piper.EXE"
-env["MASTER_KEY"] = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+env["MASTER_KEY"] = ( __import__("os").environ.get("MASTER_KEY") or __import__("sys").exit("set MASTER_KEY in the environment") )
 
 exe_path = str(REPO_ROOT / "sever-provider-new.exe")
 python_bin = sys.executable
@@ -46,7 +46,7 @@ tts_proc = subprocess.Popen([
     python_bin, "scripts/local_tts_worker.py",
     "--server", "ws://127.0.0.1:18080/api/llm/ws/worker",
     "--worker-id", "tts-worker-cluster",
-    "--token", "omni-secret-key-123",
+    "--token", ( __import__("os").environ.get("WORKER_AUTH_TOKEN") or __import__("sys").exit("set WORKER_AUTH_TOKEN in the environment") ),
     "--concurrency", "20",
     "--threads-per-voice", "3",
     "--queue-size", "32"
@@ -57,7 +57,7 @@ colab_proc = subprocess.Popen([
     python_bin, "scripts/colab_bridge_worker.py",
     "--server", "ws://127.0.0.1:18080/api/llm/ws/worker",
     "--worker-id", "colab-t4-live-bridge",
-    "--token", "omni-secret-key-123"
+    "--token", ( __import__("os").environ.get("WORKER_AUTH_TOKEN") or __import__("sys").exit("set WORKER_AUTH_TOKEN in the environment") )
 ])
 
 # Chờ workers kết nối

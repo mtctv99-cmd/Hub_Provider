@@ -34,6 +34,11 @@ async function fetchJSON(url, options = {}) {
     showAuth('Phiên đăng nhập đã hết hạn.');
     throw new Error('Phiên đăng nhập đã hết hạn.');
   }
+  if (response.status === 403 && url.startsWith('/admin/')) {
+    const overlay = $('#auth-overlay');
+    if (overlay) overlay.hidden = false;
+    authView('auth-first-login-view');
+  }
   return response;
 }
 
@@ -633,7 +638,7 @@ async function refresh() {
     const reqTotal = Number(status.requests_total ?? 0);
     const reqPerMin = Number(status.requests_per_minute ?? 0).toFixed(1);
     const aiTokens = Number(status.ai_tokens_total ?? 0).toLocaleString();
-    
+
     if ($('#row1-req-total')) $('#row1-req-total').textContent = reqTotal.toLocaleString();
     if ($('#row1-req-min')) $('#row1-req-min').textContent = reqPerMin;
     if ($('#row1-ai-tokens')) $('#row1-ai-tokens').textContent = aiTokens;
@@ -1492,14 +1497,6 @@ $('#change-password-choice')?.addEventListener('click', () => {
   authView('auth-change-view');
 });
 
-$('#skip-password-choice')?.addEventListener('click', async () => {
-  try {
-    await fetch('/admin/api/first-login/dismiss', { method: 'POST', credentials: 'same-origin' });
-  } catch (_) {}
-  lastEnteredPassword = '';
-  finishAuth();
-});
-
 $('#change-password-form')?.addEventListener('submit', async e => {
   e.preventDefault();
   const newPass = $('#new-admin-password').value;
@@ -1516,7 +1513,11 @@ $('#change-password-form')?.addEventListener('submit', async e => {
     return;
   }
   try {
-    await changeAdminPassword(lastEnteredPassword || '123456', newPass);
+    if (!lastEnteredPassword) {
+      showAuth('Vui lòng đăng nhập lại để đổi mật khẩu.');
+      return;
+    }
+    await changeAdminPassword(lastEnteredPassword, newPass);
     lastEnteredPassword = '';
     alert('Đổi mật khẩu thành công!');
     finishAuth();

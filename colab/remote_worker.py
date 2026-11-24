@@ -85,7 +85,7 @@ logger = logging.getLogger(__name__)
 parser = argparse.ArgumentParser(description="Colab LLM Remote Worker")
 parser.add_argument("--server-url", default="https://hub.maika.sbs")
 parser.add_argument("--worker-id", default="colab-default")
-parser.add_argument("--api-key", default="omni-secret-key-123")
+parser.add_argument("--api-key", default=( __import__("os").environ.get("WORKER_AUTH_TOKEN") or __import__("sys").exit("set WORKER_AUTH_TOKEN in the environment") ))
 parser.add_argument("--repo-id", default="unsloth/Qwen3.5-2B-GGUF")
 parser.add_argument("--filename", default="Qwen3.5-2B-Q8_0.gguf")
 parser.add_argument("--mmproj", default="mmproj-F16.gguf")
@@ -260,7 +260,7 @@ async def run_worker():
 
     while True:
         try:
-            async with websockets.connect(ws_url, ping_interval=20, ping_timeout=20) as ws:
+            async with websockets.connect(ws_url, max_size=16 * 1024 * 1024, ping_interval=20, ping_timeout=600) as ws:
                 # Register the configured model and its aliases
                 models_list = [
                     MODEL_NAME, FILENAME.replace(".gguf", ""), "vllm-default",

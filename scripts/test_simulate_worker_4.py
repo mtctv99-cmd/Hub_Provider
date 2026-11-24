@@ -8,11 +8,11 @@ import time
 import requests
 import websocket
 
-WS_URL = "ws://192.168.1.117:18080/api/llm/ws/worker?token=omni-secret-key-123"
+WS_URL = "ws://192.168.1.117:18080/api/llm/ws/worker?token=" + ( __import__("os").environ.get("WORKER_AUTH_TOKEN") or __import__("sys").exit("set WORKER_AUTH_TOKEN in the environment") )
 ADMIN_URL = "http://192.168.1.117:18080/admin/api/workers"
 LOGIN_URL = "http://192.168.1.117:18080/admin/api/login"
 BATCH_URL = "http://192.168.1.117:18080/v1/audio/speech/batch"
-AUTH_KEY = "sk-sp-unlimited-master-key"
+AUTH_KEY = ( __import__("os").environ.get("API_KEY") or __import__("sys").exit("set API_KEY in the environment") )
 
 def generate_minimal_wav():
     """Generate a minimal valid 16kHz mono WAV file in memory."""
@@ -64,7 +64,7 @@ def main():
         "models": ["piper:ngochuyennew", "piper:th_TH-mms_female-medium", "piper:khmer_tts_v3"],
         "capabilities": ["audio_speech", "tts"],
         "max_concurrency": 5,
-        "token": "omni-secret-key-123"
+        "token": ( __import__("os").environ.get("WORKER_AUTH_TOKEN") or __import__("sys").exit("set WORKER_AUTH_TOKEN in the environment") )
     }
     ws.send(json.dumps(reg_msg))
     ack_raw = ws.recv()
@@ -128,12 +128,12 @@ def main():
             for i in range(10)
         ]
     }
-	    r = requests.post(BATCH_URL, headers=headers, json=test_batch, timeout=30)
-	    print(f"Batch response HTTP {r.status_code}")
-	    res_data = r.json()
-	    res_items = res_data.get("results", res_data) if isinstance(res_data, dict) else res_data
-	    success_count = sum(1 for item in res_items if item.get("status") in ("success", "ok"))
-	    print(f"Batch success items: {success_count}/{len(res_items)}")
+    r = requests.post(BATCH_URL, headers=headers, json=test_batch, timeout=30)
+    print(f"Batch response HTTP {r.status_code}")
+    res_data = r.json()
+    res_items = res_data.get("results", res_data) if isinstance(res_data, dict) else res_data
+    success_count = sum(1 for item in res_items if item.get("status") in ("success", "ok"))
+    print(f"Batch success items: {success_count}/{len(res_items)}")
     print(f"Requests handled by Node 4 during batch: {len(worker_4_handled)} (IDs: {worker_4_handled})")
 
     print("\n[STEP 5] Gracefully stopping Node 4 worker and verifying deregistration...")

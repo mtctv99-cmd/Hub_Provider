@@ -14,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"sever_provider/internal/admin"
 	"sever_provider/internal/browser"
@@ -29,6 +31,10 @@ import (
 	"sever_provider/internal/settings"
 	"sever_provider/internal/workerhub"
 )
+
+// workerChatTimeout bounds chat/stream requests sent to pooled workers. Video
+// generation keeps its separate, much longer model timeout.
+const workerChatTimeout = 180 * time.Second
 
 type IdentityReader interface {
 	List(ctx context.Context, domain string) ([]identity.Credential, error)
@@ -73,6 +79,15 @@ type Handler struct {
 	AITokens        atomic.Uint64
 	VoiceStats      sync.Map
 	probeLastNano   atomic.Int64
+
+	AdminLoginLimiter *admin.LoginLimiter
+	loginLimiterOnce  sync.Once
+	probeMu           sync.Mutex
+	probeByIP         map[string]time.Time
+	probePruneAt      time.Time
+	modelsCacheMu     sync.Mutex
+	modelsCacheAt     time.Time
+	modelsCacheBody   []byte
 }
 
 func NewHandler(dispatcher *scheduler.Dispatcher, models *scheduler.ModelRegistry) *Handler {
@@ -159,14 +174,19 @@ func (h *Handler) ReadyProbe(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	now := time.Now().UnixNano()
-	last := h.probeLastNano.Load()
-	// ponytail: fixed 10s window in memory. Upgrade to per-key quota when probe use grows.
-	if last != 0 && now-last < int64(10*time.Second) {
+	now := time.Now()
+	if !h.allowProbeIP(requestRemoteIP(r), now) {
 		writeError(w, http.StatusTooManyRequests, "probe rate limit exceeded", "server_error", "probe_rate_limited")
 		return
 	}
-	if !h.probeLastNano.CompareAndSwap(last, now) {
+	nowNano := now.UnixNano()
+	last := h.probeLastNano.Load()
+	// Global 10s window limits upstream probes even when many IPs are involved.
+	if last != 0 && nowNano-last < int64(10*time.Second) {
+		writeError(w, http.StatusTooManyRequests, "probe rate limit exceeded", "server_error", "probe_rate_limited")
+		return
+	}
+	if !h.probeLastNano.CompareAndSwap(last, nowNano) {
 		writeError(w, http.StatusTooManyRequests, "probe rate limit exceeded", "server_error", "probe_rate_limited")
 		return
 	}
@@ -206,11 +226,59 @@ func (h *Handler) ReadyProbe(w http.ResponseWriter, r *http.Request) {
 	writeError(w, http.StatusServiceUnavailable, "gemini upstream probe failed", "server_error", "probe_failed")
 }
 
+const (
+	probePerIPInterval = 30 * time.Second
+	probeIPMapMax      = 4096
+)
+
+// allowProbeIP rate-limits the upstream readiness probe per client IP and keeps
+// its state map bounded. The global 10s limiter still runs afterwards.
+func (h *Handler) allowProbeIP(ip string, now time.Time) bool {
+	if h == nil {
+		return false
+	}
+	if strings.TrimSpace(ip) == "" {
+		ip = "unknown"
+	}
+	h.probeMu.Lock()
+	defer h.probeMu.Unlock()
+	if h.probeByIP == nil {
+		h.probeByIP = make(map[string]time.Time)
+	}
+	if last, ok := h.probeByIP[ip]; ok && now.Sub(last) < probePerIPInterval {
+		return false
+	}
+	h.probeByIP[ip] = now
+	if len(h.probeByIP) > probeIPMapMax || now.Sub(h.probePruneAt) > 5*time.Minute {
+		cutoff := now.Add(-10 * time.Minute)
+		for key, seen := range h.probeByIP {
+			if seen.Before(cutoff) {
+				delete(h.probeByIP, key)
+			}
+		}
+		if len(h.probeByIP) > probeIPMapMax {
+			h.probeByIP = map[string]time.Time{ip: now}
+		}
+		h.probePruneAt = now
+	}
+	return true
+}
+
 func (h *Handler) ModelsList(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
 		return
 	}
+	const modelsCacheTTL = 45 * time.Second
+	h.modelsCacheMu.Lock()
+	if len(h.modelsCacheBody) > 0 && time.Since(h.modelsCacheAt) < modelsCacheTTL {
+		body := h.modelsCacheBody
+		h.modelsCacheMu.Unlock()
+		writeCachedModels(w, body, "hit")
+		return
+	}
+	h.modelsCacheMu.Unlock()
+
 	type item struct {
 		ID           string                `json:"id"`
 		Object       string                `json:"object"`
@@ -237,7 +305,24 @@ func (h *Handler) ModelsList(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": items})
+	body, err := json.Marshal(map[string]any{"object": "list", "data": items})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to encode model list", "server_error", "models_encode_failed")
+		return
+	}
+	body = append(body, '\n')
+	h.modelsCacheMu.Lock()
+	h.modelsCacheBody = body
+	h.modelsCacheAt = time.Now()
+	h.modelsCacheMu.Unlock()
+	writeCachedModels(w, body, "miss")
+}
+
+func writeCachedModels(w http.ResponseWriter, body []byte, cacheState string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Models-Cache", cacheState)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
 
 func (h *Handler) applyReasoningAlias(w http.ResponseWriter, model string, effort *string) bool {
@@ -305,6 +390,23 @@ func (h *Handler) modelAvailable(spec scheduler.ModelSpec) bool {
 	return true
 }
 
+// unsupportedChatParameter names the first request parameter the gateway cannot
+// honour. false/0 are OpenAI's "off" values, so they pass; an explicit
+// parallel_tool_calls:false is still a hard requirement the gateway cannot keep.
+// ponytail: covers only these three names; other unknown JSON fields are still
+// silently ignored because decodeJSON does not use DisallowUnknownFields.
+func unsupportedChatParameter(req *ChatCompletionRequest) string {
+	switch {
+	case req.Logprobs:
+		return "logprobs"
+	case req.TopLogprobs > 0:
+		return "top_logprobs"
+	case req.ParallelToolCalls != nil && !*req.ParallelToolCalls:
+		return "parallel_tool_calls"
+	}
+	return ""
+}
+
 func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
@@ -319,6 +421,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "model and messages are required", "invalid_request_error", "missing_parameter")
 		return
 	}
+	setAccessLogModel(r, req.Model)
 	if !h.applyReasoningAlias(w, req.Model, &req.ReasoningEffort) {
 		return
 	}
@@ -344,6 +447,29 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasImages && (h.Models == nil || !h.Models.HasCapability(req.Model, provider.CapabilityVision)) {
 		writeError(w, http.StatusBadRequest, "selected model does not support image inputs", "invalid_request_error", "unsupported_capability")
+		return
+	}
+	if req.N > 1 {
+		// Web providers answer one turn per request; silently returning one
+		// choice would mislead clients that expect n choices.
+		writeError(w, http.StatusBadRequest, "n>1 is not supported; omit n or send n=1", "invalid_request_error", "unsupported_parameter")
+		return
+	}
+	stop, err := validateStop(req.Stop)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", "invalid_stop")
+		return
+	}
+	req.Stop = stop
+	if param := unsupportedChatParameter(&req); param != "" {
+		// The gateway cannot forward these, so silently dropping them would
+		// hand the client a reply that violates its request.
+		writeError(w, http.StatusBadRequest, param+" is not supported by this gateway; remove it from the request", "invalid_request_error", "unsupported_parameter")
+		return
+	}
+	format, formatStatus, formatMessage, formatCode := resolveResponseFormat(req.ResponseFormat, len(req.Tools) > 0)
+	if formatStatus != 0 {
+		writeError(w, formatStatus, formatMessage, "invalid_request_error", formatCode)
 		return
 	}
 	dispatchModel := req.Model
@@ -381,23 +507,33 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if sessionID != "" {
 		w.Header().Set("X-Session-ID", sessionID)
 	}
-	chatReq := provider.ChatRequest{Model: dispatchModel, ReasoningEffort: req.ReasoningEffort, SessionID: sessionID, Messages: req.Messages, Tools: req.Tools, ToolChoice: req.ToolChoice, Stream: req.Stream, Temperature: req.Temperature, MaxTokens: req.MaxTokens, ImageGeneration: wantsImage}
+	chatReq := provider.ChatRequest{Model: dispatchModel, ReasoningEffort: req.ReasoningEffort, SessionID: sessionID, Messages: req.Messages, Tools: req.Tools, ToolChoice: req.ToolChoice, Stream: req.Stream, Temperature: req.Temperature, MaxTokens: req.MaxTokens, Stop: req.Stop, ImageGeneration: wantsImage}
 	isWorkerModel := false
 	if spec, ok := h.Models.Get(req.Model); ok && (spec.Provider == "google_colab" || spec.Provider == "vllm") {
 		isWorkerModel = true
 	} else if h.Workers != nil && h.Workers.Available(req.Model) {
 		isWorkerModel = true
 	}
+	// Structured output is a gateway-side prompt+validation shim: web upstreams
+	// have no native support, and the worker/image paths ignore response_format.
+	structured := format.kind != "" && !wantsImage && !isWorkerModel
+	if structured {
+		chatReq.Messages = applyResponseFormat(chatReq.Messages, format)
+	}
 	if isWorkerModel {
+		// Worker chat must not inherit the 45-minute video window: a live but
+		// unresponsive worker would otherwise pin the handler and its slot.
+		workerCtx, cancel := context.WithTimeout(ctx, workerChatTimeout)
+		defer cancel()
 		if req.Stream {
-			h.streamColab(w, ctx, chatReq)
+			h.streamColab(w, workerCtx, chatReq)
 			return
 		}
 		if h.Workers == nil {
 			writeError(w, http.StatusServiceUnavailable, "Worker unavailable", "provider_error", "worker_unavailable")
 			return
 		}
-		resp, err := h.Workers.Chat(ctx, chatReq)
+		resp, err := h.Workers.Chat(workerCtx, chatReq)
 		if err != nil {
 			log.Printf("[GATEWAY] colab chat failed: %v", err)
 			status, message, code := maskColabError(err)
@@ -426,26 +562,12 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 			h.streamImageChat(w, ctx, chatReq, r.Header.Get("X-Request-ID"), started)
 			return
 		}
-		h.streamChat(w, ctx, chatReq, r.Header.Get("X-Request-ID"), started)
+		h.streamChat(w, ctx, chatReq, r.Header.Get("X-Request-ID"), started, req.StreamOptions != nil && req.StreamOptions.IncludeUsage)
 		return
 	}
 	resp, err := h.Dispatcher.Chat(ctx, chatReq)
 	if err != nil {
-		log.Printf("[GATEWAY] chat completion failed: %v", err)
-		status, userMsg, code := maskProviderError(err)
-		if h.AuditLog != nil {
-			auditCtx, auditCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-			defer auditCancel()
-			_ = h.AuditLog.Record(auditCtx, admin.AuditEvent{
-				RequestID: r.Header.Get("X-Request-ID"),
-				EventType: "chat_completion",
-				Model:     req.Model,
-				Latency:   time.Since(started),
-				ErrorKind: code,
-				Detail:    userMsg,
-			})
-		}
-		writeError(w, status, userMsg, "provider_error", code)
+		h.writeChatProviderError(w, r, req.Model, started, err)
 		return
 	}
 	if strings.TrimSpace(resp.Content) == "" && strings.TrimSpace(resp.ReasoningContent) == "" && len(resp.ToolCalls) == 0 && len(resp.ImageData) == 0 {
@@ -468,6 +590,65 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, status, userMsg, "provider_error", code)
 		return
+	}
+	lim := newOutputLimiter(chatReq.Stop, chatReq.MaxTokens)
+	resp.Content = lim.feed(resp.Content) + lim.flush()
+	if lim.truncated {
+		resp.FinishReason = "length"
+	}
+	if structured && len(resp.ToolCalls) == 0 {
+		validationErr := validateStructuredOutput(resp.Content, format)
+		// A cut reply cannot be healed by re-asking; the same cap would cut the
+		// retry too.
+		cannotRetry := lim.truncated || lim.stopped
+		if validationErr == nil && cannotRetry {
+			validationErr = errStructuredTruncated
+		}
+		// One correction turn, never on a sticky session: the dispatcher already
+		// bound upstream state, so a retry would replay the turn there.
+		if validationErr != nil && !cannotRetry && sessionID == "" && ctx.Err() == nil {
+			retryReq := chatReq
+			retryReq.Messages = append(append([]provider.Message{}, chatReq.Messages...),
+				provider.Message{Role: "assistant", Content: truncateForPrompt(resp.Content)},
+				provider.Message{Role: "user", Content: "Your previous reply was rejected: " + validationErr.Error() + ". Reply again with ONLY one valid JSON value."})
+			retryResp, retryErr := h.Dispatcher.Chat(ctx, retryReq)
+			if retryErr != nil {
+				h.writeChatProviderError(w, r, req.Model, started, retryErr)
+				return
+			}
+			// Two upstream turns happened; usage below is counted only once.
+			chatReq = retryReq
+			lim = newOutputLimiter(retryReq.Stop, retryReq.MaxTokens)
+			retryResp.Content = lim.feed(retryResp.Content) + lim.flush()
+			if lim.truncated {
+				retryResp.FinishReason = "length"
+			}
+			resp = retryResp
+			validationErr = validateStructuredOutput(resp.Content, format)
+			if validationErr == nil && (lim.truncated || lim.stopped) {
+				validationErr = errStructuredTruncated
+			}
+			if len(resp.ToolCalls) > 0 {
+				// The model chose a tool call instead; nothing to validate.
+				validationErr = nil
+			}
+		}
+		if validationErr != nil {
+			if h.AuditLog != nil {
+				auditCtx, auditCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+				defer auditCancel()
+				_ = h.AuditLog.Record(auditCtx, admin.AuditEvent{
+					RequestID: r.Header.Get("X-Request-ID"),
+					EventType: "chat_completion",
+					Model:     req.Model,
+					Latency:   time.Since(started),
+					ErrorKind: "invalid_response_format",
+					Detail:    validationErr.Error(),
+				})
+			}
+			writeError(w, http.StatusBadGateway, "upstream response did not match response_format", "provider_error", "invalid_response_format")
+			return
+		}
 	}
 	resp.Usage = provider.ComputeUsage(chatReq.Messages, chatReq.Tools, resp.Content, resp.ReasoningContent, resp.ToolCalls, &resp.Usage)
 	h.AITokens.Add(uint64(resp.Usage.TotalTokens))
@@ -497,6 +678,26 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	msg := &provider.Message{Role: "assistant", Content: resp.Content, ReasoningContent: resp.ReasoningContent, ToolCalls: resp.ToolCalls, Images: resp.Images}
 	writeJSON(w, 200, ChatCompletionResponse{ID: resp.ID, Object: "chat.completion", Created: time.Now().Unix(), Model: req.Model, Choices: []Choice{{Index: 0, Message: msg, FinishReason: &finish}}, Usage: resp.Usage})
+}
+
+// writeChatProviderError masks a chat dispatch failure and records the audit
+// event; shared by the first attempt and the structured-output retry.
+func (h *Handler) writeChatProviderError(w http.ResponseWriter, r *http.Request, model string, started time.Time, err error) {
+	log.Printf("[GATEWAY] chat completion failed: %v", err)
+	status, userMsg, code := maskProviderError(err)
+	if h.AuditLog != nil {
+		auditCtx, auditCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+		defer auditCancel()
+		_ = h.AuditLog.Record(auditCtx, admin.AuditEvent{
+			RequestID: r.Header.Get("X-Request-ID"),
+			EventType: "chat_completion",
+			Model:     model,
+			Latency:   time.Since(started),
+			ErrorKind: code,
+			Detail:    userMsg,
+		})
+	}
+	writeError(w, status, userMsg, "provider_error", code)
 }
 
 // attachGeneratedImage stores image bytes for the URL and also embeds the
@@ -577,9 +778,7 @@ func (h *Handler) streamImageChat(w http.ResponseWriter, ctx context.Context, re
 		writeError(w, 500, "streaming unsupported", "server_error", "streaming_unsupported")
 		return
 	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
+	setSSEHeaders(w)
 	id := "chatcmpl-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	created := time.Now().Unix()
 	finish := "stop"
@@ -594,7 +793,33 @@ func (h *Handler) streamImageChat(w http.ResponseWriter, ctx context.Context, re
 	flusher.Flush()
 }
 
-func (h *Handler) streamChat(w http.ResponseWriter, ctx context.Context, req provider.ChatRequest, requestID string, started time.Time) {
+// streamPaceStep is the artificial typing delay between streamed fragments;
+// streamPaceBudget caps the total delay per response so a long answer does not
+// pay 12ms per fragment (1000 runes would otherwise add ~1.5s).
+const (
+	streamPaceStep   = 12 * time.Millisecond
+	streamPaceBudget = 250 * time.Millisecond
+)
+
+// paceStream waits one typing step while the response still has budget; once
+// exhausted the remaining fragments are sent immediately. Shared by text and
+// tool-call deltas so one response has one budget. false = client gone.
+func paceStream(ctx context.Context, paced *time.Duration) bool {
+	if *paced >= streamPaceBudget {
+		return ctx.Err() == nil
+	}
+	*paced += streamPaceStep
+	timer := time.NewTimer(streamPaceStep)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func (h *Handler) streamChat(w http.ResponseWriter, ctx context.Context, req provider.ChatRequest, requestID string, started time.Time, includeUsage bool) {
 	ttftTimer := time.Now()
 	audit := func(errKind, detail string, ttft time.Duration) {
 		if h.AuditLog == nil {
@@ -603,11 +828,20 @@ func (h *Handler) streamChat(w http.ResponseWriter, ctx context.Context, req pro
 		if errKind == "" && detail == "success" {
 			detail = "ttft_ms=" + strconv.FormatInt(ttft.Milliseconds(), 10)
 		}
+		outcome := "success"
+		if errKind != "" {
+			outcome = "error"
+			if errKind == "request_cancelled" {
+				outcome = "cancelled"
+			}
+		}
 		_ = h.AuditLog.Record(ctx, admin.AuditEvent{
 			RequestID: requestID,
 			EventType: "chat_completion_stream",
 			Model:     req.Model,
 			Latency:   time.Since(started),
+			TTFT:      ttft,
+			Outcome:   outcome,
 			ErrorKind: errKind,
 			Detail:    detail,
 		})
@@ -626,9 +860,7 @@ func (h *Handler) streamChat(w http.ResponseWriter, ctx context.Context, req pro
 		writeError(w, 500, "streaming unsupported", "server_error", "streaming_unsupported")
 		return
 	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
+	setSSEHeaders(w)
 	id := "chatcmpl-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	created := time.Now().Unix()
 	send := func(v any) { b, _ := json.Marshal(v); fmt.Fprintf(w, "data: %s\n\n", b); flusher.Flush() }
@@ -638,8 +870,18 @@ func (h *Handler) streamChat(w http.ResponseWriter, ctx context.Context, req pro
 	var streamUsage *provider.Usage
 	var ttft time.Duration
 	firstToken := true
+	lim := newOutputLimiter(req.Stop, req.MaxTokens)
+	finishSent := false
+	var paced time.Duration
+	keepAlive := time.NewTicker(15 * time.Second)
+	defer keepAlive.Stop()
 	for {
 		select {
+		case <-keepAlive.C:
+			// SSE comment keeps proxies from closing an idle stream while the
+			// upstream web model is still "thinking".
+			fmt.Fprint(w, ": keepalive\n\n")
+			flusher.Flush()
 		case <-ctx.Done():
 			audit("request_cancelled", "request cancelled", ttft)
 			return
@@ -672,9 +914,19 @@ func (h *Handler) streamChat(w http.ResponseWriter, ctx context.Context, req pro
 				audit(code, userMsg, ttft)
 				return
 			}
-			streamContent.WriteString(chunk.Content)
+			content := chunk.Content
+			if lim != nil {
+				content = lim.feed(content)
+				if chunk.Done {
+					content += lim.flush()
+				}
+				if lim.Done() && content == "" && !chunk.Done {
+					continue
+				}
+			}
+			streamContent.WriteString(content)
 			streamReasoning.WriteString(chunk.ReasoningContent)
-			if firstToken && (chunk.Content != "" || chunk.ReasoningContent != "" || len(chunk.ToolCalls) > 0) {
+			if firstToken && (content != "" || chunk.ReasoningContent != "" || len(chunk.ToolCalls) > 0) {
 				ttft = time.Since(ttftTimer)
 				firstToken = false
 			}
@@ -690,15 +942,81 @@ func (h *Handler) streamChat(w http.ResponseWriter, ctx context.Context, req pro
 			if chunk.Usage != nil {
 				streamUsage = chunk.Usage
 			}
-			delta := &provider.Message{Role: "assistant", Content: chunk.Content, ReasoningContent: chunk.ReasoningContent, ToolCalls: chunk.ToolCalls}
 			var finish *string
-			if chunk.FinishReason != "" {
+			if lim != nil && lim.Done() {
+				s := "stop"
+				if lim.truncated {
+					s = "length"
+				}
+				finish = &s
+			} else if chunk.FinishReason != "" {
 				finish = &chunk.FinishReason
 			} else if chunk.Done {
 				s := "stop"
 				finish = &s
 			}
-			send(ChatCompletionResponse{ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model, Choices: []Choice{{Index: 0, Delta: delta, FinishReason: finish}}, Usage: usageOrEmpty(chunk.Usage)})
+			var doneUsage *provider.Usage
+			if chunk.Done {
+				toks := provider.ComputeUsage(req.Messages, req.Tools, streamContent.String(), streamReasoning.String(), streamToolCalls, streamUsage)
+				doneUsage = &toks
+			}
+			parts := splitStreamText(content, 8)
+			if len(parts) == 0 {
+				parts = []string{""}
+			}
+			// Adapters release tool calls whole on the final chunk; split the
+			// arguments so OpenAI clients receive the fragments they expect.
+			tcDeltas := splitToolCallDeltas(chunk.ToolCalls, 48)
+			if len(tcDeltas) > 0 && content == "" && chunk.ReasoningContent == "" {
+				// Nothing but the tool call to send; skip the empty text delta.
+				parts = nil
+			}
+			for i, part := range parts {
+				if finishSent && lim.Done() && content == "" {
+					break // finish_reason already emitted by the limiter
+				}
+				delta := &provider.Message{Role: "assistant", Content: part, ReasoningContent: chunk.ReasoningContent}
+				partFinish := (*string)(nil)
+				if i == len(parts)-1 && len(tcDeltas) == 0 {
+					partFinish = finish
+				}
+				usage := usageOrEmpty(chunk.Usage)
+				if doneUsage != nil && i == len(parts)-1 {
+					usage = *doneUsage
+				}
+				send(ChatCompletionResponse{ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model, Choices: []Choice{{Index: 0, Delta: delta, FinishReason: partFinish}}, Usage: usage})
+				if partFinish != nil {
+					finishSent = true
+				}
+				if i < len(parts)-1 {
+					if !paceStream(ctx, &paced) {
+						return
+					}
+				}
+			}
+			for i, tc := range tcDeltas {
+				if finishSent {
+					break // the limiter already closed the stream
+				}
+				delta := &provider.Message{Role: "assistant", ToolCalls: []provider.ToolCall{tc}}
+				partFinish := (*string)(nil)
+				if i == len(tcDeltas)-1 {
+					partFinish = finish
+				}
+				usage := usageOrEmpty(chunk.Usage)
+				if doneUsage != nil && i == len(tcDeltas)-1 {
+					usage = *doneUsage
+				}
+				send(ChatCompletionResponse{ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model, Choices: []Choice{{Index: 0, Delta: delta, FinishReason: partFinish}}, Usage: usage})
+				if partFinish != nil {
+					finishSent = true
+				}
+				if i < len(tcDeltas)-1 {
+					if !paceStream(ctx, &paced) {
+						return
+					}
+				}
+			}
 			if chunk.Done {
 				if strings.TrimSpace(streamContent.String()) == "" && strings.TrimSpace(streamReasoning.String()) == "" && len(streamToolCalls) == 0 {
 					emptyErr := provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, "upstream stream completed without text content or tool calls")
@@ -707,10 +1025,13 @@ func (h *Handler) streamChat(w http.ResponseWriter, ctx context.Context, req pro
 					audit(code, userMsg, ttft)
 					return
 				}
-				toks := provider.ComputeUsage(req.Messages, req.Tools, streamContent.String(), streamReasoning.String(), streamToolCalls, streamUsage)
+				toks := *doneUsage
 				h.AITokens.Add(uint64(toks.TotalTokens))
 				if h.Traffic != nil && toks.TotalTokens > 0 {
 					go func(tok int) { _ = h.Traffic.RecordMetrics(context.Background(), time.Now(), 0, int64(tok), 0) }(toks.TotalTokens)
+				}
+				if includeUsage {
+					send(ChatCompletionResponse{ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model, Choices: []Choice{}, Usage: toks})
 				}
 				audit("", "success", ttft)
 				fmt.Fprint(w, "data: [DONE]\n\n")
@@ -721,13 +1042,192 @@ func (h *Handler) streamChat(w http.ResponseWriter, ctx context.Context, req pro
 	}
 }
 
+// Stop sequences are scanned against a held-back stream buffer on every chunk,
+// so unbounded client input is a memory/CPU sink. The limits match OpenAI's
+// documented maximum of four sequences.
+const (
+	maxStopSequences     = 4
+	maxStopSequenceRunes = 256
+)
+
+// validateStop normalises client stop sequences and rejects unbounded input.
+func validateStop(stops []string) ([]string, error) {
+	if len(stops) > maxStopSequences {
+		return nil, fmt.Errorf("at most %d stop sequences are allowed", maxStopSequences)
+	}
+	out := make([]string, 0, len(stops))
+	for _, s := range stops {
+		if s == "" {
+			continue
+		}
+		if utf8.RuneCountInString(s) > maxStopSequenceRunes {
+			return nil, fmt.Errorf("a stop sequence exceeds %d characters", maxStopSequenceRunes)
+		}
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+// outputLimiter applies OpenAI stop sequences and max_tokens gateway-side:
+// reverse-engineered web providers ignore both parameters.
+// ponytail: max_tokens is approximated as 4 runes per token, the same ratio as
+// provider.EstimateTokens; swap in a real tokenizer if exact caps matter.
+type outputLimiter struct {
+	stops     [][]rune
+	hold      int
+	limit     int
+	emitted   int
+	pending   []rune
+	stopped   bool
+	truncated bool
+}
+
+func newOutputLimiter(stops []string, maxTokens int) *outputLimiter {
+	l := &outputLimiter{}
+	for _, s := range stops {
+		r := []rune(s)
+		if len(r) == 0 {
+			continue
+		}
+		l.stops = append(l.stops, r)
+		if len(r)-1 > l.hold {
+			l.hold = len(r) - 1
+		}
+	}
+	if maxTokens > 0 {
+		l.limit = maxTokens * 4
+	}
+	return l
+}
+
+func (l *outputLimiter) Done() bool { return l.stopped || l.truncated }
+
+// feed returns the part of text that is safe to emit right away; the rest is
+// held so a stop sequence split across chunks is still detected.
+func (l *outputLimiter) feed(text string) string {
+	if l == nil || l.Done() || text == "" {
+		return ""
+	}
+	l.pending = append(l.pending, []rune(text)...)
+	cut := len(l.pending)
+	for _, s := range l.stops {
+		if i := strings.Index(string(l.pending), string(s)); i >= 0 {
+			if n := utf8.RuneCountInString(string(l.pending)[:i]); n < cut {
+				cut = n
+			}
+		}
+	}
+	if cut < len(l.pending) {
+		l.stopped = true
+	} else if tail := len(l.pending) - l.hold; tail < cut {
+		cut = tail
+		if cut < 0 {
+			cut = 0
+		}
+	}
+	out := string(l.pending[:cut])
+	l.pending = l.pending[cut:]
+	return l.limitText(out)
+}
+
+// flush releases text still held back once the upstream turn is complete.
+func (l *outputLimiter) flush() string {
+	if l == nil || l.Done() || len(l.pending) == 0 {
+		return ""
+	}
+	out := string(l.pending)
+	l.pending = nil
+	return l.limitText(out)
+}
+
+func (l *outputLimiter) limitText(s string) string {
+	r := []rune(s)
+	if l.limit > 0 && l.emitted+len(r) > l.limit {
+		l.truncated = true
+		if room := l.limit - l.emitted; room > 0 {
+			r = r[:room]
+		} else {
+			r = nil
+		}
+	}
+	l.emitted += len(r)
+	return string(r)
+}
+
+func splitStreamText(text string, maxRunes int) []string {
+	if text == "" {
+		return nil
+	}
+	if maxRunes < 1 {
+		maxRunes = 8
+	}
+	runes := []rune(text)
+	if len(runes) <= maxRunes*2 {
+		return []string{text}
+	}
+	out := make([]string, 0, (len(runes)+maxRunes-1)/maxRunes)
+	for start := 0; start < len(runes); {
+		end := start + maxRunes
+		if end >= len(runes) {
+			out = append(out, string(runes[start:]))
+			break
+		}
+		if unicode.IsLetter(runes[end-1]) && unicode.IsLetter(runes[end]) {
+			for end < len(runes) && unicode.IsLetter(runes[end]) {
+				end++
+			}
+			for end < len(runes) && !unicode.IsSpace(runes[end]) {
+				end++
+			}
+		}
+		out = append(out, string(runes[start:end]))
+		start = end
+	}
+	return out
+}
+
+// splitToolCallDeltas splits complete tool-call arguments into the fragments
+// OpenAI clients expect: the first fragment carries id/type/name, later ones
+// only index+arguments. Arguments are rune-split, which keeps JSON's own escapes
+// intact because clients concatenate the raw strings.
+func splitToolCallDeltas(calls []provider.ToolCall, maxRunes int) []provider.ToolCall {
+	if len(calls) == 0 {
+		return nil
+	}
+	if maxRunes < 1 {
+		maxRunes = 48
+	}
+	var out []provider.ToolCall
+	for _, tc := range calls {
+		args := []rune(tc.Function.Arguments)
+		if len(args) == 0 {
+			out = append(out, tc)
+			continue
+		}
+		for start, first := 0, true; start < len(args); start, first = start+maxRunes, false {
+			end := start + maxRunes
+			if end > len(args) {
+				end = len(args)
+			}
+			fragment := provider.ToolCall{
+				Index:    tc.Index,
+				Function: provider.FunctionCallDesc{Arguments: string(args[start:end])},
+			}
+			if first {
+				fragment.ID, fragment.Type, fragment.Function.Name = tc.ID, tc.Type, tc.Function.Name
+			}
+			out = append(out, fragment)
+		}
+	}
+	return out
+}
+
 func usageOrEmpty(v *provider.Usage) provider.Usage {
 	if v == nil {
 		return provider.Usage{}
 	}
 	return *v
 }
-
 func (h *Handler) AudioSpeech(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
@@ -742,6 +1242,7 @@ func (h *Handler) AudioSpeech(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "model and input are required", "invalid_request_error", "missing_parameter")
 		return
 	}
+	setAccessLogModel(r, req.Model)
 	data, mime, err := h.Dispatcher.Speech(r.Context(), req)
 	if err != nil {
 		log.Printf("[GATEWAY] speech synthesis failed: %v", err)
@@ -874,6 +1375,7 @@ func (h *Handler) Images(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "model and prompt are required", "invalid_request_error", "missing_parameter")
 		return
 	}
+	setAccessLogModel(r, req.Model)
 	if req.N != 0 && req.N != 1 || req.AspectRatio != "" && req.AspectRatio != "auto" || req.Style != "" || req.Quality != "" || req.Size != "" {
 		writeError(w, http.StatusBadRequest, "requested image option is not supported by this model", "invalid_request_error", "unsupported_option")
 		return
@@ -888,7 +1390,7 @@ func (h *Handler) Images(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.Dispatcher.Image(r.Context(), provider.ImageRequest{Model: req.Model, Prompt: req.Prompt, Size: req.Size, SessionID: sessID})
 	if err != nil {
-		log.Printf("[GATEWAY] image generation failed: %v", err)
+		log.Printf("[GATEWAY] image generation failed: request_id=%s model=%s: %v", r.Header.Get("X-Request-ID"), req.Model, err)
 		status, userMsg, code := maskProviderError(err)
 		if h.AuditLog != nil {
 			auditCtx, auditCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
@@ -1179,6 +1681,10 @@ func maskProviderError(err error) (int, string, string) {
 	}
 	msg := err.Error()
 	lower := strings.ToLower(msg)
+	var retry interface{ RetryAfter() time.Time }
+	if errors.As(err, &retry) {
+		return http.StatusTooManyRequests, "upstream provider rate limited", "rate_limit_exceeded"
+	}
 	if errors.Is(err, context.DeadlineExceeded) || strings.Contains(lower, "timeout") {
 		return http.StatusGatewayTimeout, "upstream provider request timed out", "upstream_timeout"
 	}
@@ -1190,6 +1696,9 @@ func maskProviderError(err error) (int, string, string) {
 	}
 	if errors.Is(err, provider.ErrImageBytesUnavailable) || strings.Contains(lower, "image bytes unavailable") {
 		return http.StatusBadGateway, "generated image bytes unavailable", "image_bytes_unavailable"
+	}
+	if errors.Is(err, provider.ErrInvalidImageURL) {
+		return http.StatusBadRequest, "image URL is invalid or not publicly reachable", "invalid_image_url"
 	}
 	if errors.Is(err, provider.ErrCapabilityUnsupported) || strings.Contains(lower, "does not support requested capability") {
 		return http.StatusBadRequest, "requested capability unsupported by provider", "unsupported_capability"

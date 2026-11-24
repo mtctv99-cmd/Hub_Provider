@@ -311,7 +311,7 @@ class VLLMWorker:
         logger.info("Connecting to WorkerHub at %s...", ws_url)
         while True:
             try:
-                async with websockets.connect(ws_url, ping_interval=20, ping_timeout=25) as ws:
+                async with websockets.connect(ws_url, max_size=16 * 1024 * 1024, ping_interval=20, ping_timeout=600) as ws:
                     reg_payload = {
                         "type": "register",
                         "worker_id": self.worker_id,
@@ -371,7 +371,7 @@ def main():
     parser = argparse.ArgumentParser(description="vLLM Worker for Sever_provider WorkerHub")
     parser.add_argument("--server", default="ws://127.0.0.1:18080/api/llm/ws/worker", help="WorkerHub WebSocket endpoint")
     parser.add_argument("--worker-id", default=f"vllm-{int(time.time())}", help="Unique worker ID")
-    parser.add_argument("--token", default=os.environ.get("WORKER_AUTH_TOKEN", "omni-secret-key-123"), help="WorkerHub auth token")
+    parser.add_argument("--token", default=( __import__("os").environ.get("WORKER_AUTH_TOKEN") or __import__("sys").exit("set WORKER_AUTH_TOKEN in the environment") ), help="WorkerHub auth token")
     parser.add_argument("--model", default="Qwen/Qwen3.5-2B", help="Model name or HuggingFace ID")
     parser.add_argument("--alias", action="append", default=[], help="Additional model alias (can be repeated)")
     parser.add_argument("--vllm-url", default=None, help="Existing vLLM OpenAI API URL (e.g. http://127.0.0.1:8000)")

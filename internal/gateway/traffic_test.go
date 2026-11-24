@@ -25,6 +25,7 @@ func TestTrafficStoreAndEndpoint(t *testing.T) {
 	h := NewHandler(nil, nil)
 	h.SetAdminAuth(auth)
 	h.Traffic = NewTrafficStore(database.DB)
+	defer h.Traffic.Close()
 	router := NewRouter(h, "")
 	server := httptest.NewServer(router)
 	defer server.Close()
@@ -131,6 +132,9 @@ func TestTrafficSummaryPersistsAcrossStoreRestart(t *testing.T) {
 	if err := store.RecordMetrics(context.Background(), now, 0, 42, 3); err != nil {
 		t.Fatal(err)
 	}
+	// Buffered counters only reach SQLite on Flush/Close, so flush before the
+	// restart; otherwise the new store (and its pending map) is empty.
+	store.Close()
 	if err := database.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -147,6 +151,56 @@ func TestTrafficSummaryPersistsAcrossStoreRestart(t *testing.T) {
 	}
 	if summary.Requests != 1 || summary.DurationMs != 125 || summary.Tokens != 42 || summary.AudioSec != 3 || summary.RequestsThisMinute != 1 {
 		t.Fatalf("persisted traffic summary = %+v", summary)
+	}
+}
+
+func TestTrafficStoreBatchesAndFlushes(t *testing.T) {
+	database, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "batch.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	store := NewTrafficStore(database.DB)
+	defer store.Close()
+	now := time.Now().UTC()
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		if err := store.Record(ctx, now, 10*time.Millisecond); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var rows int64
+	if err := database.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM request_traffic_hourly`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Fatalf("expected writes to stay buffered, found %d rows", rows)
+	}
+	if err := store.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := store.Summary(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Requests != 3 || summary.DurationMs != 30 || summary.RequestsThisMinute != 3 {
+		t.Fatalf("flushed traffic summary = %+v", summary)
+	}
+}
+
+func BenchmarkTrafficRecord(b *testing.B) {
+	database, err := db.Open(context.Background(), filepath.Join(b.TempDir(), "bench.sqlite"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer database.Close()
+	store := NewTrafficStore(database.DB)
+	defer store.Close()
+	now := time.Now().UTC()
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = store.Record(ctx, now, time.Millisecond)
 	}
 }
 

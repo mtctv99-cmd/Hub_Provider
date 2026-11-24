@@ -6,6 +6,7 @@ Writes bench_results.json and prints a summary table.
 """
 import argparse
 import json
+import os
 import re
 import statistics
 import sys
@@ -17,7 +18,8 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 DEFAULT_BASE = "http://192.168.1.117:18080"
-DEFAULT_KEY = "sk-sp-unlimited-master-key"
+# Never hardcode a key: pass --key or export SEVER_API_KEY.
+DEFAULT_KEY = os.environ.get("SEVER_API_KEY", "")
 
 def _norm(text):
     text = unicodedata.normalize("NFD", text.lower().replace("đ", "d"))
@@ -161,6 +163,8 @@ def main():
     ap.add_argument("--concurrency", type=int, default=3)
     ap.add_argument("--out", default="bench_results.json")
     args = ap.parse_args()
+    if not args.key:
+        ap.error("--key or SEVER_API_KEY is required")
 
     if args.models:
         models = [m.strip() for m in args.models.split(",") if m.strip()]

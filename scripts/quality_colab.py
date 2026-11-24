@@ -5,7 +5,7 @@ import json
 import requests
 
 BASE = "http://127.0.0.1:18080"
-HDR = {"Authorization": "Bearer sk-sp-unlimited-master-key", "Content-Type": "application/json"}
+HDR = {"Authorization": "Bearer " + ( __import__("os").environ.get("API_KEY") or __import__("sys").exit("set API_KEY in the environment") ), "Content-Type": "application/json"}
 MODELS = ["qwen3.5-2b", "gemma4-e2b", "qwen3.5-0.8b"]
 
 with open("/tmp/bench_cat.png", "rb") as f:

@@ -114,7 +114,7 @@ func (a *Adapter) Chat(ctx context.Context, req provider.ChatRequest, secret []b
 	var toolCalls []provider.ToolCall
 	finishReason := "stop"
 	if len(req.Tools) > 0 && req.ToolChoice != "none" {
-		cleanText, toolCalls = ParseToolCalls(text)
+		cleanText, toolCalls = provider.ParseToolCallsForTools(text, req.Tools)
 		if len(toolCalls) > 0 {
 			finishReason = "tool_calls"
 		}
@@ -126,11 +126,12 @@ func (a *Adapter) Chat(ctx context.Context, req provider.ChatRequest, secret []b
 		return provider.ChatResponse{}, provider.NewEmptyResponseError(provider.EmptyReasonUpstreamEmpty, "gemini chat returned empty content with no tool calls")
 	}
 	return provider.ChatResponse{
-		ID:           "gemini-" + strconv.FormatInt(time.Now().UnixNano(), 10),
-		Model:        req.Model,
-		Content:      cleanText,
-		ToolCalls:    toolCalls,
-		FinishReason: finishReason,
+		ID:               "gemini-" + strconv.FormatInt(time.Now().UnixNano(), 10),
+		Model:            req.Model,
+		Content:          cleanText,
+		ReasoningContent: ExtractResponseThoughts(raw),
+		ToolCalls:        toolCalls,
+		FinishReason:     finishReason,
 		Upstream: provider.UpstreamState{
 			ConversationID: returned.ConversationID,
 			ResponseID:     returned.ResponseID,
@@ -233,17 +234,37 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, secr
 
 		reader := bufio.NewReader(resp.Body)
 		var prevText string
+		var prevThoughts string
 		var lastMeta ConversationMetadata
 		sawValidLine := false
 		sawValidEnd := false
 		for {
 			line, readErr := reader.ReadString('\n')
 			if line != "" {
-				text, meta, ok := ExtractResponseLine(line)
-				if ok {
+				text, thoughts, meta, hasFrame := parseFrame(line)
+				if hasFrame {
 					sawValidLine = true
 					if meta.ConversationID != "" {
 						lastMeta = meta
+					}
+					// Reasoning is its own snapshot stream: emit its delta even on
+					// frames where the answer text has not advanced. A snapshot that
+					// is not an extension of the previous one is adopted silently
+					// (no delta) so a reset never replays the whole chain.
+					if thoughts != "" && thoughts != prevThoughts {
+						delta := ""
+						if strings.HasPrefix(thoughts, prevThoughts) {
+							delta = thoughts[len(prevThoughts):]
+						}
+						prevThoughts = thoughts
+						if delta != "" {
+							select {
+							case <-ctx.Done():
+								ch <- provider.StreamChunk{Err: ctx.Err()}
+								return
+							case ch <- provider.StreamChunk{ReasoningContent: delta}:
+							}
+						}
 					}
 					if text != prevText {
 						var delta string
@@ -296,7 +317,7 @@ func (a *Adapter) StreamChat(ctx context.Context, req provider.ChatRequest, secr
 		finalText := prevText
 		if hasTools {
 			var cleanText string
-			cleanText, toolCalls = ParseToolCalls(prevText)
+			cleanText, toolCalls = provider.ParseToolCallsForTools(prevText, req.Tools)
 			finalText = cleanText
 			if len(toolCalls) > 0 {
 				finishReason = "tool_calls"
@@ -557,10 +578,6 @@ func (a *Adapter) ValidateCookie(ctx context.Context, cookie string) error {
 		return ErrCookieInvalidOrExpired
 	}
 	return nil
-}
-
-func ParseToolCalls(text string) (string, []provider.ToolCall) {
-	return provider.ParseToolCalls(text)
 }
 
 func formatPromptWithTools(messages []provider.Message, tools []provider.Tool, toolChoice any) string {

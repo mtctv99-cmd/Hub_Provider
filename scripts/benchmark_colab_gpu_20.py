@@ -10,7 +10,7 @@ import wave
 from pathlib import Path
 
 SERVER_URL = "http://192.168.1.117:18080"
-API_KEY = "sk-sp-unlimited-master-key"
+API_KEY = ( __import__("os").environ.get("API_KEY") or __import__("sys").exit("set API_KEY in the environment") )
 ENDPOINT = f"{SERVER_URL}/v1/audio/speech"
 
 prompts = [

@@ -1,0 +1,19 @@
+[Unit]
+Description=Sever Provider SQLite online backup
+Documentation=file:///media/reup/Data_sv4/Sever_provider/docs/operations-runbook.md
+# Deliberately not Requires=/After= sever-provider.service: a backup must be
+# possible even while the application is stopped or failed.
+
+[Service]
+Type=oneshot
+WorkingDirectory=/media/reup/Data_sv4/Sever_provider
+ExecStart=/usr/bin/python3 -I /media/reup/Data_sv4/Sever_provider/scripts/ops/sqlite-backup.py --db /media/reup/Data_sv4/Sever_provider/data/orchestrator.db --backup-dir %h/backups/sever-provider --retention 14
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+PrivateTmp=yes
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+# The script exits non-zero on integrity/row-count/space failure, which leaves
+# the oneshot unit failed and visible in `systemctl --user status`.

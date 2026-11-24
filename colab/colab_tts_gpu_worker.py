@@ -355,7 +355,7 @@ def run_ws_loop(server_url: str, token: str, worker_id: str, worker: ColabTTSWor
 def main():
     parser = argparse.ArgumentParser(description="Colab TTS GPU Worker")
     parser.add_argument('--server', default='wss://hub.maika.sbs/api/llm/ws/worker', help='WorkerHub WebSocket endpoint')
-    parser.add_argument('--token', default=os.environ.get('WORKER_AUTH_TOKEN', 'omni-secret-key-123'), help='Worker auth token')
+    parser.add_argument('--token', default=( __import__("os").environ.get("WORKER_AUTH_TOKEN") or __import__("sys").exit("set WORKER_AUTH_TOKEN in the environment") ), help='Worker auth token')
     parser.add_argument('--worker-id', default='colab-t4-tts-worker', help='Worker registration ID')
     parser.add_argument('--models-dir', default='models', help='Directory for cached ONNX models')
     parser.add_argument('--download-url', default='https://hub.maika.sbs', help='Base HTTP URL to download models from')

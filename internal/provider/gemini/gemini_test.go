@@ -27,6 +27,31 @@ func TestPayloadHasFReqAnd69Slots(t *testing.T) {
 	}
 }
 
+func TestWebModelCatalogMatchesUpstreamPicker(t *testing.T) {
+	want := map[string]struct {
+		hex   string
+		mode  int
+		image bool
+	}{
+		"gemini-4-hydrogen":     {"56fdd199312815e2", 1, true},
+		"gemini-3.8-flash":      {"56fdd199312815e2", 1, true},
+		"gemini-3.6-flash":      {"56fdd199312815e2", 1, true},
+		"gemini-3.5-flash-lite": {"8c46e95b1a07cecc", 6, false},
+		"gemini-3.1-pro":        {"e6fa609c3fa255c0", 3, false},
+		"gemini-4-carbon":       {"797f3d0293f288ad", 3, false},
+		"gemini-4-argon":        {"95a4c0abcba24364", 8, false},
+	}
+	for id, expect := range want {
+		got, ok := webModels[id]
+		if !ok {
+			t.Fatalf("%s missing from webModels", id)
+		}
+		if got.hex != expect.hex || got.mode != expect.mode || got.image != expect.image {
+			t.Fatalf("%s = %+v, want %+v", id, got, expect)
+		}
+	}
+}
+
 func TestArgonPayloadAndThinkingEffort(t *testing.T) {
 	for _, tc := range []struct {
 		effort string
@@ -147,6 +172,43 @@ func TestParserExtractsTextAndMetadata(t *testing.T) {
 	}
 }
 
+func TestParserStripsGroundingCitations(t *testing.T) {
+	inner := []any{"ignored", []any{"c_1", "r_1"}, nil, nil, []any{[]any{"rc_1", []any{"Mèo con màu cam", "[cite: 1]", " trên chăn.", "[cite: 2, 3]"}}}}
+	innerJSON, _ := json.Marshal(inner)
+	outer, _ := json.Marshal([]any{[]any{"wrb.fr", nil, string(innerJSON)}})
+	if text := ExtractResponseText(string(outer)); text != "Mèo con màu cam trên chăn." {
+		t.Fatalf("citations leaked: %q", text)
+	}
+}
+
+func TestCleanTextStripsFollowUpSuggestions(t *testing.T) {
+	raw := "Your name is Probe123.\n\n<FollowUp label=\"Want me to remember something else?\">Remember</FollowUp>"
+	if got := cleanText(raw); got != "Your name is Probe123." {
+		t.Fatalf("follow-up block leaked: %q", got)
+	}
+}
+
+func TestCleanTextKeepsProseAfterToolCodeBlocks(t *testing.T) {
+	// Shape observed live: code-interpreter fences come first, the answer after.
+	raw := "\n\n```python?code_reference&code_event_index=1\n" +
+		"revenue = 3 * 48 * 12\nprint(revenue)\n" +
+		"```\n\n```text?code_stdout&code_event_index=1\nRevenue: 29,808,000 VND\n" +
+		"```\n\n**Tổng doanh thu: 29.808.000 đồng**\n\n* Tổng số gói: 1728"
+	got := cleanText(raw)
+	if strings.Contains(got, "?code_") || strings.Contains(got, "print(revenue)") {
+		t.Fatalf("tool fences leaked: %q", got)
+	}
+	if !strings.Contains(got, "29.808.000") || !strings.Contains(got, "Tổng số gói") {
+		t.Fatalf("answer prose lost: %q", got)
+	}
+
+	// A normal fenced code block must survive untouched.
+	plain := "Đây là code:\n```python\nprint('hi')\n```\nXong."
+	if out := cleanText(plain); !strings.Contains(out, "print('hi')") {
+		t.Fatalf("normal code fence removed: %q", out)
+	}
+}
+
 func TestGenerateUsesInjectedRPCServer(t *testing.T) {
 	inner := []any{"ignored", []any{"c_1", "r_1"}, nil, nil, []any{[]any{"rc_1", []any{"ok"}}}}
 	innerJSON, _ := json.Marshal(inner)
@@ -213,5 +275,79 @@ func TestStreamChatUsesGuestEndpointAndReturnsMetadata(t *testing.T) {
 	}
 	if done.Upstream.ConversationID != "c_stream" || done.Upstream.ResponseID != "r_stream" || done.Upstream.ChoiceID != "rc_stream" {
 		t.Fatalf("upstream=%+v", done.Upstream)
+	}
+}
+
+// thinkingFrame builds one synthetic wrb.fr snapshot: text in candidate[1] and,
+// when non-empty, the thinking chain in candidate[37][0][0]. The slot shape comes
+// from the documented protocol, not from a captured upstream frame.
+func thinkingFrame(text, thoughts string) []byte {
+	candidate := make([]any, 38)
+	candidate[0] = "rc_1"
+	candidate[1] = []any{text}
+	if thoughts != "" {
+		candidate[37] = []any{[]any{thoughts}}
+	}
+	inner := []any{"ignored", []any{"c_1", "r_1"}, nil, nil, []any{candidate}}
+	innerJSON, _ := json.Marshal(inner)
+	line, _ := json.Marshal([]any{[]any{"wrb.fr", nil, string(innerJSON)}})
+	return line
+}
+
+func TestExtractResponseThoughtsFromThinkingSlot(t *testing.T) {
+	raw := string(thinkingFrame("Đáp án", "Bước 1"))
+	if got := ExtractResponseThoughts(raw); got != "Bước 1" {
+		t.Fatalf("thoughts=%q", got)
+	}
+	if got := ExtractResponseText(raw); got != "Đáp án" {
+		t.Fatalf("text=%q", got)
+	}
+	if text, meta, ok := ExtractResponseLine(raw); !ok || text != "Đáp án" || meta.ChoiceID != "rc_1" {
+		t.Fatalf("line ok=%v text=%q meta=%+v", ok, text, meta)
+	}
+}
+
+func TestCandidateThoughtsGuards(t *testing.T) {
+	cases := map[string][]any{
+		"frame too short":  make([]any, 3),
+		"empty outer":      withSlot(37, []any{}),
+		"nil outer":        withSlot(37, nil),
+		"string outer":     withSlot(37, "str"),
+		"empty inner":      withSlot(37, []any{[]any{}}),
+		"scalar inner":     withSlot(37, []any{"x"}),
+		"non-string value": withSlot(37, []any{[]any{42}}),
+	}
+	for name, candidate := range cases {
+		if got := candidateThoughts(candidate); got != "" {
+			t.Fatalf("%s: thoughts=%q", name, got)
+		}
+	}
+}
+
+func withSlot(index int, value any) []any {
+	candidate := make([]any, 38)
+	candidate[index] = value
+	return candidate
+}
+
+func TestThinkingFrameWithoutAnswerTextStillYieldsThoughts(t *testing.T) {
+	candidate := withSlot(37, []any{[]any{"Suy nghĩ"}})
+	inner := []any{"ignored", []any{"c_1", "r_1"}, nil, nil, []any{candidate}}
+	innerJSON, _ := json.Marshal(inner)
+	line, _ := json.Marshal([]any{[]any{"wrb.fr", nil, string(innerJSON)}})
+	if got := ExtractResponseThoughts(string(line)); got != "Suy nghĩ" {
+		t.Fatalf("thoughts=%q", got)
+	}
+	if text, _, ok := ExtractResponseLine(string(line)); ok || text != "" {
+		t.Fatalf("text=%q ok=%v", text, ok)
+	}
+}
+
+func TestExtractResponseThoughtsFollowsTextFrame(t *testing.T) {
+	// Older turn (empty thoughts) plus the answering frame: reasoning must come
+	// from the frame that produced the longest text.
+	raw := string(thinkingFrame("ngắn", "")) + "\n" + string(thinkingFrame("câu trả lời dài hơn", "chuỗi suy nghĩ"))
+	if got := ExtractResponseThoughts(raw); got != "chuỗi suy nghĩ" {
+		t.Fatalf("thoughts=%q", got)
 	}
 }

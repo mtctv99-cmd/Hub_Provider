@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"sever_provider/internal/identity"
 	"sever_provider/internal/provider"
@@ -59,7 +60,7 @@ func (e *emptyAdapter) Video(context.Context, provider.VideoRequest, []byte) (pr
 	return provider.VideoResponse{}, provider.ErrCapabilityUnsupported
 }
 
-func TestChatEmptyContentBlocksSessionAndRecordsFailure(t *testing.T) {
+func TestChatEmptyContentBlocksSessionWithoutChargingBreaker(t *testing.T) {
 	models := NewModelRegistry()
 	_ = models.Register(ModelSpec{ID: "test-model", Provider: "test", Capabilities: []provider.Capability{provider.CapabilityChat}})
 	source := &trackingSource{creds: []identity.Credential{{ID: "c1", Domain: "test", Status: identity.StatusHealthy, MaxConcurrency: 1}}}
@@ -71,6 +72,7 @@ func TestChatEmptyContentBlocksSessionAndRecordsFailure(t *testing.T) {
 		Credentials: source,
 		Adapters:    singleRegistry{adapter},
 		Leases:      NewLeaseManager(),
+		Breakers:    NewBreakerRegistry(),
 	}
 
 	_, err := d.Chat(context.Background(), provider.ChatRequest{Model: "test-model", SessionID: "sess-1"})
@@ -83,7 +85,16 @@ func TestChatEmptyContentBlocksSessionAndRecordsFailure(t *testing.T) {
 	if len(source.successes) > 0 {
 		t.Fatalf("empty response was recorded as success: %v", source.successes)
 	}
-	if len(source.statusSets) == 0 {
-		t.Fatal("expected credential failure to be recorded")
+	// M16: an empty answer is client-caused, not an account fault. It must not
+	// charge the credential status or open the provider/account breakers.
+	if len(source.statusSets) != 0 {
+		t.Fatalf("empty response charged credential status: %+v", source.statusSets)
+	}
+	now := time.Now()
+	if d.Breakers.Get("test").State() != CircuitClosed || d.Breakers.GetAccount("c1").State() != CircuitClosed {
+		t.Fatal("empty response opened a breaker")
+	}
+	if !d.Breakers.Get("test").Allow(now) || !d.Breakers.GetAccount("c1").Allow(now) {
+		t.Fatal("empty response blocked a breaker")
 	}
 }

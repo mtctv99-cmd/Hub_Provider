@@ -37,6 +37,44 @@ func TestTerminalErrorThrottled(t *testing.T) {
 	}
 }
 
+// M1: OutOfCredits/Throttled phải là lỗi retryable có RetryAfter để scheduler
+// đặt cooldown thay vì trả 502/DEGRADED chung.
+func TestTerminalErrorOutOfCreditsIsRetryable(t *testing.T) {
+	before := time.Now()
+	err := terminalError("OutOfCredits", "You've used your daily chat limit")
+	limit, ok := err.(*LimitError)
+	if !ok {
+		t.Fatalf("expected *LimitError, got %T: %v", err, err)
+	}
+	if limit.Kind != LimitKindOutOfCredits {
+		t.Fatalf("kind=%q, want %q", limit.Kind, LimitKindOutOfCredits)
+	}
+	if !strings.Contains(err.Error(), "out of credits") {
+		t.Fatalf("error text lost quota diagnosis: %v", err)
+	}
+	until := limit.RetryAfter()
+	if until.Before(before.Add(OutOfCreditsCooldown-time.Second)) || until.After(time.Now().Add(OutOfCreditsCooldown+time.Second)) {
+		t.Fatalf("RetryAfter=%v, want ~now+%v", until, OutOfCreditsCooldown)
+	}
+	if isInvalidRequestError(err) {
+		t.Fatal("OutOfCredits must not classify as invalid request")
+	}
+}
+
+func TestTerminalErrorThrottledHasRetryAfter(t *testing.T) {
+	err := terminalError("Throttled", "slow down")
+	limit, ok := err.(*LimitError)
+	if !ok {
+		t.Fatalf("expected *LimitError, got %T: %v", err, err)
+	}
+	if limit.Kind != LimitKindThrottled {
+		t.Fatalf("kind=%q, want %q", limit.Kind, LimitKindThrottled)
+	}
+	if delay := time.Until(limit.RetryAfter()); delay <= 0 || delay > ThrottleCooldown+time.Second {
+		t.Fatalf("RetryAfter delay=%v, want ~%v", delay, ThrottleCooldown)
+	}
+}
+
 // Empty Success vẫn là lỗi: handler sẽ không emit HTTP 200 rỗng.
 func TestTerminalSuccessEmptyRejected(t *testing.T) {
 	if err := terminalError("Success", ""); err == nil {

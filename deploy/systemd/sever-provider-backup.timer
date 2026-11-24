@@ -1,0 +1,15 @@
+[Unit]
+Description=Daily Sever Provider SQLite backup
+Documentation=file:///media/reup/Data_sv4/Sever_provider/docs/operations-runbook.md
+
+[Timer]
+# Local time on the production host is +07. 03:30 avoids the evening traffic
+# peak; Persistent=true catches up after a reboot or missed run.
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=10m
+AccuracySec=1m
+Persistent=true
+Unit=sever-provider-backup.service
+
+[Install]
+WantedBy=timers.target

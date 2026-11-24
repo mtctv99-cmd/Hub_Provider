@@ -5,7 +5,7 @@ import urllib.error
 from openai import OpenAI
 
 API_BASE = "http://127.0.0.1:18080/v1"
-API_KEY = "sk-sp-unlimited-master-key"
+API_KEY = ( __import__("os").environ.get("API_KEY") or __import__("sys").exit("set API_KEY in the environment") )
 client = OpenAI(base_url=API_BASE, api_key=API_KEY, timeout=25.0)
 
 print("=" * 70, flush=True)

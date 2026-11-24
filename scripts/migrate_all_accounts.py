@@ -257,7 +257,7 @@ def migrate_tiktok(conn: sqlite3.Connection):
 
 def add_admin_api_key(conn: sqlite3.Connection):
     print("\n--- 4. Provisioning Admin API Key ---")
-    admin_key = os.environ.get("ADMIN_KEY", "sk-sp-admin-key-production")
+    admin_key = os.environ.get("ADMIN_KEY") or exit("set ADMIN_KEY in the environment")
     h = hashlib.sha256(admin_key.encode("utf-8")).digest()
     key_hash = base64.urlsafe_b64encode(h).decode().rstrip("=")
 
@@ -266,7 +266,7 @@ def add_admin_api_key(conn: sqlite3.Connection):
         VALUES ('key-admin-prod', 'Production Admin Key', ?, 1, 'all')
         ON CONFLICT(id) DO UPDATE SET key_hash=excluded.key_hash, active=1
     """, (key_hash,))
-    print(f" -> Provisioned Admin API Key: {admin_key}")
+    print(" -> Provisioned Admin API Key from ADMIN_KEY")
 
 
 def main():

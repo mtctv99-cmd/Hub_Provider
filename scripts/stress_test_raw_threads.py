@@ -20,7 +20,7 @@ python_bin = sys.executable
 server_port = 18090
 server_url = f"http://127.0.0.1:{server_port}"
 ws_url = f"ws://127.0.0.1:{server_port}/api/llm/ws/worker"
-worker_token = "stress-test-secret-token"
+worker_token = ( __import__("os").environ.get("WORKER_AUTH_TOKEN") or __import__("sys").exit("set WORKER_AUTH_TOKEN in the environment") )
 
 out_dir = Path("data/stress_test_raw")
 out_dir.mkdir(parents=True, exist_ok=True)
@@ -34,7 +34,7 @@ env["COLAB_WORKER_KEY"] = worker_token
 env["WORKER_AUTH_TOKEN"] = worker_token
 env["PIPER_MODELS_DIR"] = "models"
 env["PIPER_BIN"] = r"C:\Users\MaiThanhChu\AppData\Local\hermes\hermes-agent\venv\Scripts\piper.EXE"
-env["MASTER_KEY"] = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+env["MASTER_KEY"] = ( __import__("os").environ.get("MASTER_KEY") or __import__("sys").exit("set MASTER_KEY in the environment") )
 
 exe_path = str((Path(__file__).resolve().parent.parent / "sever-provider-new.exe"))
 log(f"[1/4] Khởi động Server {exe_path} trên cổng {server_port}...")

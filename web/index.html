@@ -30,10 +30,9 @@
       </div>
       <div id="auth-first-login-view" hidden>
         <h1>Chào mừng bạn</h1>
-        <p class="auth-copy">Đây là lần đầu đăng nhập. Bạn có muốn đổi mật khẩu không?</p>
+        <p class="auth-copy">Đây là lần đầu đăng nhập. Bạn cần đổi mật khẩu trước khi vào dashboard.</p>
         <div class="auth-actions">
           <button id="change-password-choice" class="btn auth-submit" type="button">Đổi mật khẩu</button>
-          <button id="skip-password-choice" class="btn btn-secondary" type="button">Không đổi, vào dashboard</button>
         </div>
       </div>
       <div id="auth-change-view" hidden>
@@ -104,7 +103,7 @@
               <line x1="0" y1="30" x2="600" y2="30" class="traffic-grid" />
               <line x1="0" y1="60" x2="600" y2="60" class="traffic-grid" />
               <line x1="0" y1="90" x2="600" y2="90" class="traffic-grid" />
-              
+
               <polygon id="traffic-polygon-duration" class="traffic-area area-duration" points="" />
               <polyline id="traffic-polyline-duration" class="traffic-line line-duration" points="" />
 
@@ -397,7 +396,7 @@
           </div>
           <p id="worker-load-error" class="api-key-error" role="alert" hidden></p>
           <p id="worker-action-status" class="worker-action-status" role="status" aria-live="polite" hidden></p>
-          
+
           <div class="worker-summary-strip">
             <div class="worker-summary-chip"><span class="chip-label">Local TTS</span><strong id="wsum-local">—</strong></div>
             <div class="worker-summary-chip"><span class="chip-label">Remote Piper</span><strong id="wsum-piper">0</strong></div>

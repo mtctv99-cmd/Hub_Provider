@@ -1,8 +1,10 @@
+import os
 import urllib.request
 import json
 import time
 
-API_KEY = "omni-secret-key-123"
+# Never hardcode a key: export SEVER_API_KEY.
+API_KEY = os.environ.get("SEVER_API_KEY", "")
 BASE_URL = "http://127.0.0.1:18080/v1/chat/completions"
 MODELS = ["deepseek-chat", "gemini-3.8-flash", "gpt-5.6", "deepseek-reasoner"]
 

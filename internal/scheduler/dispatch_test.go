@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -188,6 +189,75 @@ func TestDispatcherModelFailover(t *testing.T) {
 	}
 }
 
+// hangingAdapter giữ request tới khi attempt deadline cắt ctx, mô phỏng upstream treo.
+type hangingAdapter struct{ countAdapter }
+
+func (a *hangingAdapter) Chat(ctx context.Context, _ provider.ChatRequest, _ []byte) (provider.ChatResponse, error) {
+	<-ctx.Done()
+	return provider.ChatResponse{}, ctx.Err()
+}
+
+func TestDispatcherChatPerAttemptTimeoutAllowsFailover(t *testing.T) {
+	source := &trackingSource{creds: []identity.Credential{{ID: "c1", Domain: "test", Status: identity.StatusHealthy, MaxConcurrency: 1}}}
+	models := NewModelRegistry()
+	_ = models.Register(ModelSpec{ID: "primary", Provider: "primary", Capabilities: []provider.Capability{provider.CapabilityChat}, FailoverTo: []string{"fallback"}, TimeoutSec: 1})
+	_ = models.Register(ModelSpec{ID: "fallback", Provider: "fallback", Capabilities: []provider.Capability{provider.CapabilityChat}, TimeoutSec: 1})
+	registry := provider.NewRegistry()
+	registry.Register(adapterWithName{name: "primary", Adapter: &hangingAdapter{}})
+	registry.Register(adapterWithName{name: "fallback", Adapter: &countAdapter{}})
+	d := &Dispatcher{Models: models, Credentials: source, Adapters: registry, Leases: NewLeaseManager(), Breakers: NewBreakerRegistry()}
+	start := time.Now()
+	resp, err := d.Chat(context.Background(), provider.ChatRequest{Model: "primary", Messages: []provider.Message{{Role: "user", Content: "hi"}}})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("failover after attempt timeout failed: %v", err)
+	}
+	if resp.Content != "hello" {
+		t.Fatalf("unexpected fallback response: %q", resp.Content)
+	}
+	if elapsed >= 2500*time.Millisecond {
+		t.Fatalf("primary attempt ate the whole budget: %v", elapsed)
+	}
+}
+
+func TestFailoverEligible(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"deadline", context.DeadlineExceeded, true},
+		{"wrapped deadline", fmt.Errorf("x: %w", context.DeadlineExceeded), true},
+		{"timed out", errors.New("upstream timed out"), true},
+		{"canceled", context.Canceled, false},
+		{"generic", errors.New("bad request"), false},
+	}
+	for _, tc := range cases {
+		if got := failoverEligible(tc.err); got != tc.want {
+			t.Fatalf("%s: failoverEligible(%v)=%v, want %v", tc.name, tc.err, got, tc.want)
+		}
+	}
+}
+
+func TestDispatcherFailoverOnTimeout(t *testing.T) {
+	source := &trackingSource{creds: []identity.Credential{{ID: "c1", Domain: "test", Status: identity.StatusHealthy, MaxConcurrency: 1}}}
+	models := NewModelRegistry()
+	_ = models.Register(ModelSpec{ID: "primary", Provider: "primary", Capabilities: []provider.Capability{provider.CapabilityChat}, FailoverTo: []string{"fallback"}, TimeoutSec: 10})
+	_ = models.Register(ModelSpec{ID: "fallback", Provider: "fallback", Capabilities: []provider.Capability{provider.CapabilityChat}, TimeoutSec: 10})
+	registry := provider.NewRegistry()
+	// Primary trả DeadlineExceeded ngay, ctx tổng vẫn sống → phải failover.
+	registry.Register(adapterWithName{name: "primary", Adapter: &countAdapter{callErr: context.DeadlineExceeded}})
+	registry.Register(adapterWithName{name: "fallback", Adapter: &countAdapter{}})
+	d := &Dispatcher{Models: models, Credentials: source, Adapters: registry, Leases: NewLeaseManager(), Breakers: NewBreakerRegistry()}
+	resp, err := d.Chat(context.Background(), provider.ChatRequest{Model: "primary", Messages: []provider.Message{{Role: "user", Content: "hi"}}})
+	if err != nil {
+		t.Fatalf("failover on timeout failed: %v", err)
+	}
+	if resp.Content != "hello" {
+		t.Fatalf("unexpected fallback response: %q", resp.Content)
+	}
+}
+
 type adapterWithName struct {
 	name    string
 	Adapter provider.Adapter
@@ -302,5 +372,43 @@ func TestDispatcherAccountBreakerSkipsCredential(t *testing.T) {
 	// c1 should have been skipped (account breaker open), c2 used
 	if len(source.successes) != 1 || source.successes[0] != "c2" {
 		t.Errorf("expected MarkSuccess(c2) only, got %v", source.successes)
+	}
+}
+
+func TestDispatcherSkipsChronicDegradedCredentialWhenHealthyExists(t *testing.T) {
+	source := &trackingSource{creds: []identity.Credential{
+		{ID: "healthy", Domain: "test", Status: identity.StatusHealthy, MaxConcurrency: 2},
+		{ID: "dead", Domain: "test", Status: identity.StatusDegraded, ConsecutiveErrors: 9, MaxConcurrency: 2},
+	}}
+	adapter := &countAdapter{callErr: errors.New("provider unavailable")}
+	models := NewModelRegistry()
+	_ = models.Register(ModelSpec{ID: "test-model", Provider: "test", Capabilities: []provider.Capability{provider.CapabilityChat}, TimeoutSec: 10})
+	d := &Dispatcher{Models: models, Credentials: source, Adapters: singleRegistry{adapter}, Leases: NewLeaseManager(), Breakers: NewBreakerRegistry()}
+
+	if _, err := d.Chat(context.Background(), provider.ChatRequest{Model: "test-model", Messages: []provider.Message{{Role: "user", Content: "hi"}}}); err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if adapter.calls != 1 {
+		t.Fatalf("expected only the healthy credential to be called, got %d calls", adapter.calls)
+	}
+	if len(source.statusSets) != 1 || source.statusSets[0].ID != "healthy" {
+		t.Fatalf("expected failure recorded only for healthy credential, got %+v", source.statusSets)
+	}
+}
+
+func TestDispatcherUsesChronicDegradedCredentialWhenNoHealthyLeft(t *testing.T) {
+	source := &trackingSource{creds: []identity.Credential{
+		{ID: "dead", Domain: "test", Status: identity.StatusDegraded, ConsecutiveErrors: 9, MaxConcurrency: 2},
+	}}
+	adapter := &countAdapter{}
+	models := NewModelRegistry()
+	_ = models.Register(ModelSpec{ID: "test-model", Provider: "test", Capabilities: []provider.Capability{provider.CapabilityChat}, TimeoutSec: 10})
+	d := &Dispatcher{Models: models, Credentials: source, Adapters: singleRegistry{adapter}, Leases: NewLeaseManager(), Breakers: NewBreakerRegistry()}
+
+	if _, err := d.Chat(context.Background(), provider.ChatRequest{Model: "test-model", Messages: []provider.Message{{Role: "user", Content: "hi"}}}); err != nil {
+		t.Fatalf("Chat failed: %v", err)
+	}
+	if adapter.calls != 1 {
+		t.Fatalf("expected the degraded credential to be tried when no healthy one exists, got %d", adapter.calls)
 	}
 }

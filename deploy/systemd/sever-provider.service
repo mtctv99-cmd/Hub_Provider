@@ -1,0 +1,45 @@
+[Unit]
+Description=Sever Provider API
+Documentation=file:///media/reup/Data_sv4/Sever_provider/docs/operations-runbook.md
+After=network-online.target
+
+# Deployment note (M19): this unit is installed in the *user* manager on the
+# production host (systemctl --user + linger). network-online.target exists only
+# in the system manager there (verified 2026-11-24), so Wants= is intentionally
+# omitted. If this file is installed as a system unit instead, add:
+#     Wants=network-online.target
+
+[Service]
+# Type=exec reports started only after execve succeeds; Type=simple reports
+# started before the binary is executed and hides early configuration failures.
+Type=exec
+WorkingDirectory=/media/reup/Data_sv4/Sever_provider
+
+# The leading '-' makes a missing worker.env non-fatal. Missing *required*
+# runtime configuration is still expected to fail inside the process.
+EnvironmentFile=-%h/.config/sever-provider/worker.env
+Environment=PIPER_BIN=/home/reup/.local/bin/piper
+Environment=PIPER_MODELS_DIR=/media/reup/Data_sv4/ttsoioer/models
+ExecStart=/media/reup/Data_sv4/Sever_provider/sever-provider -config config
+
+# Startup failures (unreadable config, secret store init, DB open, listen
+# failure) exit non-zero so Restart=on-failure can act on them.
+Restart=on-failure
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=45
+
+# M20: bounded but conservative. Observed cgroup peak on 2026-11-24 was
+# 2.96 GiB (current 1.86 GiB). MemoryHigh starts throttling/reclaim above 4 GiB;
+# MemoryMax is a hard ceiling at 5 GiB, leaving ~69% headroom over the observed
+# peak and far below the host's 62 GiB. Revisit only with memory.events data.
+# Do NOT copy these limits to sever-v2: that service is owned separately.
+MemoryAccounting=yes
+MemoryHigh=4G
+MemoryMax=5G
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

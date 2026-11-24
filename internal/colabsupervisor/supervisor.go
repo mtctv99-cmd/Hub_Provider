@@ -543,7 +543,7 @@ func (s *Supervisor) runCommand(ctx context.Context, action, accountID string) e
 	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(cmdCtx, parts[0], append(parts[1:], action, accountID)...)
-	cmd.Env = append(os.Environ(), "COLAB_ACCOUNT_ID="+accountID, "COLAB_ACTION="+action)
+	cmd.Env = supervisorCommandEnv(accountID, action)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		if cmdCtx.Err() != nil {
@@ -552,6 +552,32 @@ func (s *Supervisor) runCommand(ctx context.Context, action, accountID string) e
 		return fmt.Errorf("colab supervisor command failed: %w (%s)", err, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+// supervisorCommandEnv builds the child environment. PYTHONUNBUFFERED=1 makes
+// Python workers flush stdout/stderr as they write, so journal lines are not
+// replayed hours later when the process exits. Existing values for the keys we
+// own are dropped instead of duplicated.
+func supervisorCommandEnv(accountID, action string) []string {
+	managed := []string{"PYTHONUNBUFFERED=", "COLAB_ACCOUNT_ID=", "COLAB_ACTION="}
+	env := make([]string, 0, len(os.Environ())+len(managed))
+	for _, entry := range os.Environ() {
+		skip := false
+		for _, prefix := range managed {
+			if strings.HasPrefix(entry, prefix) {
+				skip = true
+				break
+			}
+		}
+		if !skip {
+			env = append(env, entry)
+		}
+	}
+	return append(env,
+		"PYTHONUNBUFFERED=1",
+		"COLAB_ACCOUNT_ID="+accountID,
+		"COLAB_ACTION="+action,
+	)
 }
 
 func isCapacityError(err error) bool {

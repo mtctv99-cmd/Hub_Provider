@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     kind TEXT NOT NULL DEFAULT 'generic',
     model TEXT,
     engine TEXT,
+    owner_key_id TEXT NOT NULL DEFAULT '',
     input_json TEXT NOT NULL DEFAULT '{}',
     result_json TEXT,
     output_path TEXT,

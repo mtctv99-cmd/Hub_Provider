@@ -6,9 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/netip"
 	"net/url"
 	"regexp"
 	"strings"
@@ -137,48 +135,14 @@ func extractImageURLs(value any) []string {
 	return out
 }
 
+// Copilot only accepts public HTTPS images; the shared guard in provider keeps
+// the SSRF rules in one place.
 func validateImageURL(rawURL string) error {
-	u, err := url.Parse(rawURL)
-	if err != nil || u.Scheme != "https" || u.User != nil || u.Fragment != "" || u.Hostname() == "" || (u.Port() != "" && u.Port() != "443") || strings.HasSuffix(u.Hostname(), ".") {
-		return errors.New("copilot image URL is not a public HTTPS address")
-	}
-	if _, err := netip.ParseAddr(u.Hostname()); err == nil {
-		return errors.New("copilot image IP literals are not allowed")
-	} else if !strings.Contains(u.Hostname(), ".") || strings.ContainsAny(u.Hostname(), "\\%") || strings.HasSuffix(strings.ToLower(u.Hostname()), ".localhost") {
-		return errors.New("copilot image host is invalid")
-	}
-	return nil
-}
-
-func publicImageIP(ip netip.Addr) bool {
-	if !ip.IsValid() || !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.Is4In6() {
-		return false
-	}
-	for _, cidr := range []string{"100.64.0.0/10", "192.0.0.0/24", "192.0.2.0/24", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "240.0.0.0/4", "2001:db8::/32", "fc00::/7"} {
-		if netip.MustParsePrefix(cidr).Contains(ip) {
-			return false
-		}
-	}
-	return true
+	return provider.ValidateImageURL(rawURL, false)
 }
 
 func imageTransport() *http.Transport {
-	return &http.Transport{Proxy: nil, TLSHandshakeTimeout: 10 * time.Second, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-		host, port, err := net.SplitHostPort(address)
-		if err != nil {
-			return nil, errors.New("invalid image address")
-		}
-		ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
-		if err != nil || len(ips) == 0 {
-			return nil, errors.New("unable to resolve image host")
-		}
-		for _, ip := range ips {
-			if !publicImageIP(ip) {
-				return nil, errors.New("image host resolves to a nonpublic IP")
-			}
-		}
-		return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, net.JoinHostPort(ips[0].String(), port))
-	}}
+	return provider.ImageTransport()
 }
 
 func downloadImage(ctx context.Context, rawURL string) (provider.ImageResponse, error) {

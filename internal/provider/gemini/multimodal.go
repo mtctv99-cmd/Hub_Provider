@@ -19,7 +19,7 @@ import (
 
 const maxImageBytes = 16 * 1024 * 1024 // 16 MB
 
-func ParseImageData(rawURL string) ([]byte, string, string, error) {
+func ParseImageData(ctx context.Context, rawURL string) ([]byte, string, string, error) {
 	rawURL = strings.TrimSpace(rawURL)
 	if rawURL == "" {
 		return nil, "", "", errors.New("empty image URL")
@@ -58,21 +58,33 @@ func ParseImageData(rawURL string) ([]byte, string, string, error) {
 		return data, filename, mimeType, nil
 	}
 
-	// Remote HTTP/HTTPS URL
+	// Remote HTTP/HTTPS URL. Fetching client-supplied URLs is SSRF surface, so
+	// the shared guard rejects private/loopback hosts, IP literals and odd ports
+	// before any request leaves the gateway.
 	u, err := url.Parse(rawURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
-		return nil, "", "", fmt.Errorf("unsupported image URL scheme: %s", rawURL)
+		return nil, "", "", fmt.Errorf("%w: unsupported image URL scheme", provider.ErrInvalidImageURL)
 	}
-
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Get(rawURL)
+	if err := provider.ValidateImageURL(rawURL, true); err != nil {
+		return nil, "", "", err
+	}
+	client, closeIdle := provider.NewImageClient(15*time.Second, true)
+	defer closeIdle()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("create remote image request: %w", err)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("fetch remote image: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, "", "", fmt.Errorf("fetch remote image HTTP %d", resp.StatusCode)
+	}
+	if resp.ContentLength > maxImageBytes {
+		return nil, "", "", errors.New("remote image exceeds maximum size of 16MB")
 	}
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxImageBytes+1))
@@ -83,11 +95,10 @@ func ParseImageData(rawURL string) ([]byte, string, string, error) {
 		return nil, "", "", errors.New("remote image exceeds maximum size of 16MB")
 	}
 
-	mimeType := resp.Header.Get("Content-Type")
-	if mimeType == "" || mimeType == "application/octet-stream" {
-		mimeType = http.DetectContentType(data)
+	mimeType, err := provider.ImageMimeType(resp.Header.Get("Content-Type"), data)
+	if err != nil {
+		return nil, "", "", err
 	}
-	mimeType = strings.Split(mimeType, ";")[0]
 
 	ext := extensionForMime(mimeType)
 	base := filepath.Base(u.Path)
@@ -262,7 +273,7 @@ func (a *Adapter) ExtractAndUploadFiles(ctx context.Context, messages []provider
 	for _, m := range messages {
 		for _, p := range m.Parts {
 			if p.Type == "image_url" && p.ImageURL != nil && p.ImageURL.URL != "" {
-				data, filename, mimeType, err := ParseImageData(p.ImageURL.URL)
+				data, filename, mimeType, err := ParseImageData(ctx, p.ImageURL.URL)
 				if err != nil {
 					return nil, fmt.Errorf("parse image payload: %w", err)
 				}

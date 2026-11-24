@@ -113,6 +113,41 @@ func (p *Pool) Add(id string) {
 func (p *Pool) Acquire(now time.Time) (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.acquireLocked(now)
+}
+
+// AcquirePreferred acquires the requested session when it is available, adding
+// it to the pool if necessary, and otherwise falls back to the normal pool
+// rotation. It always goes through the pool so cooldown and throttle state are
+// applied even when a credential carries its own session_id.
+func (p *Pool) AcquirePreferred(id string, now time.Time) (string, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return p.Acquire(now)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	idx := -1
+	for i := range p.sessions {
+		if p.sessions[i].ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		p.sessions = append(p.sessions, Session{ID: id})
+		idx = len(p.sessions) - 1
+	}
+	preferred := &p.sessions[idx]
+	if !now.Before(preferred.CooldownUntil) && (preferred.LastUsed.IsZero() || now.Sub(preferred.LastUsed) >= 200*time.Millisecond) {
+		preferred.LastUsed = now
+		p.next = (idx + 1) % len(p.sessions)
+		return preferred.ID, nil
+	}
+	return p.acquireLocked(now)
+}
+
+func (p *Pool) acquireLocked(now time.Time) (string, error) {
 	if len(p.sessions) == 0 {
 		return "", errors.New("tiktok session pool is empty")
 	}
@@ -219,39 +254,38 @@ func (a *Adapter) Speech(ctx context.Context, req provider.SpeechRequest, creden
 	if len(parts) == 0 {
 		return nil, "", errors.New("tts input is empty")
 	}
-		voice := req.Voice
-		if strings.HasPrefix(voice, "tiktok:") {
-			voice = strings.TrimPrefix(voice, "tiktok:")
-		}
-		switch voice {
-		case "vi_male":
-			voice = "BV074_streaming"
-		case "vi_female":
-			voice = "BV075_streaming"
-		case "":
-			if strings.HasPrefix(req.Model, "tiktok:") {
-				voice = strings.TrimPrefix(req.Model, "tiktok:")
-				if voice == "vi_male" {
-					voice = "BV074_streaming"
-				} else if voice == "vi_female" {
-					voice = "BV075_streaming"
-				}
-			} else {
+	voice := req.Voice
+	if strings.HasPrefix(voice, "tiktok:") {
+		voice = strings.TrimPrefix(voice, "tiktok:")
+	}
+	switch voice {
+	case "vi_male":
+		voice = "BV074_streaming"
+	case "vi_female":
+		voice = "BV075_streaming"
+	case "":
+		if strings.HasPrefix(req.Model, "tiktok:") {
+			voice = strings.TrimPrefix(req.Model, "tiktok:")
+			if voice == "vi_male" {
+				voice = "BV074_streaming"
+			} else if voice == "vi_female" {
 				voice = "BV075_streaming"
 			}
+		} else {
+			voice = "BV075_streaming"
 		}
+	}
 
 	var secret struct {
 		SessionID string `json:"session_id"`
 	}
 	_ = json.Unmarshal(credentialSecret, &secret)
-	var session string
-	var err error
-	if secret.SessionID != "" {
-		session = secret.SessionID
-	} else {
-		session, err = a.Pool.Acquire(time.Now())
+	if a.Pool == nil {
+		return nil, "", errors.New("tiktok session pool is not configured")
 	}
+	// Always acquire through the pool, even when the credential names a
+	// session, so per-session cooldown and 200 ms throttle are enforced.
+	session, err := a.Pool.AcquirePreferred(secret.SessionID, time.Now())
 	if err != nil {
 		return nil, "", err
 	}

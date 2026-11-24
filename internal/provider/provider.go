@@ -12,6 +12,7 @@ import (
 var (
 	ErrCapabilityUnsupported = errors.New("provider does not support requested capability")
 	ErrImageBytesUnavailable = errors.New("generated image bytes unavailable")
+	ErrInvalidImageURL       = errors.New("invalid image URL")
 	ErrNoCapacity            = errors.New("no provider capacity available")
 	ErrProviderUnavailable   = errors.New("provider unavailable")
 	ErrEmptyResponse         = errors.New("empty_response")
@@ -123,9 +124,12 @@ type Function struct {
 type ToolCall struct {
 	// Index identifies the call within a streamed response. OpenAI SDKs require
 	// it on delta.tool_calls; omitempty keeps non-streaming payloads unchanged.
-	Index    *int             `json:"index,omitempty"`
-	ID       string           `json:"id"`
-	Type     string           `json:"type"`
+	Index *int `json:"index,omitempty"`
+	// ID/Type/Name are omitempty because streamed tool-call fragments after the
+	// first one carry only index+arguments. Non-streaming adapters always set
+	// all three, so their JSON is unchanged.
+	ID       string           `json:"id,omitempty"`
+	Type     string           `json:"type,omitempty"`
 	Function FunctionCallDesc `json:"function"`
 }
 
@@ -143,7 +147,7 @@ func ToolChoiceRequiresCall(choice any) bool {
 }
 
 type FunctionCallDesc struct {
-	Name      string `json:"name"`
+	Name      string `json:"name,omitempty"`
 	Arguments string `json:"arguments"`
 }
 
@@ -270,6 +274,7 @@ type ChatRequest struct {
 	Stream          bool          `json:"stream,omitempty"`
 	Temperature     *float32      `json:"temperature,omitempty"`
 	MaxTokens       int           `json:"max_tokens,omitempty"`
+	Stop            []string      `json:"stop,omitempty"`
 	Upstream        UpstreamState `json:"upstream,omitempty"`
 	// ImageGeneration asks the adapter to produce an image instead of text.
 	ImageGeneration bool `json:"image_generation,omitempty"`

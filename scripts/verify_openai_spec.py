@@ -1,11 +1,12 @@
 import json
+import os
 import urllib.request
 import urllib.error
 from openai import OpenAI
 
 API_BASE = "http://127.0.0.1:18080/v1"
-VALID_KEY = "sk-sp-test1234567890abcdef"
-INVALID_KEY = "sk-sp-invalidkey999"
+VALID_KEY = os.environ.get("VERIFY_API_KEY") or exit("set VERIFY_API_KEY in the environment")
+INVALID_KEY = "invalid-key-for-negative-test"
 
 print("=" * 65)
 print("KIỂM TRA ĐỐI SOÁT CHUẨN OPENAI-COMPATIBLE TRÊN SEVER_PROVIDER")

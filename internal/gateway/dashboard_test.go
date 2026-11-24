@@ -32,6 +32,7 @@ func authenticatedDashboardRequest(t *testing.T, h *Handler) *http.Request {
 }
 
 func TestDashboardStatusRequiresAdminSession(t *testing.T) {
+	t.Setenv("ADMIN_PASSWORD", "dashboard-test-password")
 	h := NewHandler(nil, nil)
 	h.SetAdminAuth(admin.NewFromEnv())
 	router := NewRouter(h, "")

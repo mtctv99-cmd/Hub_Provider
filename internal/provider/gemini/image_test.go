@@ -56,6 +56,13 @@ func TestExtractGeneratedImageURL(t *testing.T) {
 	}
 }
 
+func TestExtractGeneratedImageURLRefusal(t *testing.T) {
+	_, err := extractGeneratedImageURL(imageFrame(t, nil, "I can search for images, but can't create any for you at the moment."))
+	if err == nil || !strings.Contains(err.Error(), "geminiimagecapabilityunavailable") {
+		t.Fatalf("expected capability-unavailable error, got %v", err)
+	}
+}
+
 func TestGeneratedImageURLAllowlist(t *testing.T) {
 	for _, raw := range []string{
 		"http://lh3.googleusercontent.com/gg-dl/id",

@@ -760,3 +760,26 @@ func TestRotateSpreadsAttempts(t *testing.T) {
 		t.Fatalf("rotation must prefer the least recently attempted account, started %q", started)
 	}
 }
+
+func TestSupervisorCommandEnvIsUnbuffered(t *testing.T) {
+	t.Setenv("PYTHONUNBUFFERED", "0")
+	t.Setenv("COLAB_ACCOUNT_ID", "stale")
+	env := supervisorCommandEnv("colab-fresh_at_gmail_com", "start")
+	values := make(map[string][]string)
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		values[key] = append(values[key], value)
+	}
+	if got := values["PYTHONUNBUFFERED"]; len(got) != 1 || got[0] != "1" {
+		t.Fatalf("PYTHONUNBUFFERED = %v, want exactly [1]", got)
+	}
+	if got := values["COLAB_ACCOUNT_ID"]; len(got) != 1 || got[0] != "colab-fresh_at_gmail_com" {
+		t.Fatalf("COLAB_ACCOUNT_ID = %v, want exactly the current account", got)
+	}
+	if got := values["COLAB_ACTION"]; len(got) != 1 || got[0] != "start" {
+		t.Fatalf("COLAB_ACTION = %v, want exactly [start]", got)
+	}
+}

@@ -288,6 +288,13 @@ func extractGeneratedImageURL(raw string) (string, error) {
 			}
 		}
 	}
+	lower := strings.ToLower(raw)
+	if strings.Contains(lower, "can't create any for you") ||
+		strings.Contains(lower, "can't create it right now") ||
+		strings.Contains(lower, "image creation may not be available") ||
+		strings.Contains(lower, "image creation isn't available in your location") {
+		return "", errors.New("geminiimagecapabilityunavailable: image creation unsupported for this account/region")
+	}
 	if found == "" {
 		return "", errors.New("gemini image response contains no supported generated image")
 	}
@@ -354,7 +361,7 @@ func (a *Adapter) downloadGeneratedImageWithCookie(ctx context.Context, rawURL, 
 		client = http.DefaultClient
 	}
 	copyClient := *client
-	copyClient.Timeout = 30 * time.Second
+	copyClient.Timeout = 10 * time.Second
 	copyClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 4 {
 			return errors.New("gemini image redirect rejected")

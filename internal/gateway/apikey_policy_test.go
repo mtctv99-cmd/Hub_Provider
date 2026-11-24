@@ -3,6 +3,7 @@ package gateway
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -98,10 +99,14 @@ func TestAPIKeyScopeExpiryRateAndMutations(t *testing.T) {
 		t.Fatal(err)
 	}
 	r = do("GET", "/v1/models", nil, data.Key, false)
-	if r.StatusCode != 200 {
-		t.Fatalf("models list after expiry should remain public: %d", r.StatusCode)
+	if r.StatusCode != 401 {
+		t.Fatalf("models list with an expired key should be rejected: %d", r.StatusCode)
 	}
+	expiredBody, _ := io.ReadAll(r.Body)
 	_ = r.Body.Close()
+	if !strings.Contains(string(expiredBody), "key_expired") {
+		t.Fatalf("expected key_expired, got %s", expiredBody)
+	}
 	r = do("POST", "/admin/api/apikeys/activate/"+data.Metadata.ID, nil, "", true)
 	if r.StatusCode != 409 {
 		t.Fatalf("expired activation status %d", r.StatusCode)
@@ -127,6 +132,42 @@ func TestModelsListRemainsPublicWhenAPIKeysExist(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("models list status=%d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	// A key that is sent is validated even on the public catalog.
+	bogus, err := http.NewRequest(http.MethodGet, srv.URL+"/v1/models", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bogus.Header.Set("Authorization", "Bearer definitely-invalid-key")
+	bogusResp, err := http.DefaultClient.Do(bogus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bogusBody, _ := io.ReadAll(bogusResp.Body)
+	_ = bogusResp.Body.Close()
+	if bogusResp.StatusCode != http.StatusUnauthorized || !strings.Contains(string(bogusBody), "invalid_api_key") {
+		t.Fatalf("bogus key status=%d body=%s", bogusResp.StatusCode, bogusBody)
+	}
+
+	// Keys scoped away from model discovery are refused with 403.
+	if _, chatOnly, err := keys.CreateWithOptions(admin.CreateKeySpec{Name: "chat-only", Scopes: []string{"chat"}}); err != nil {
+		t.Fatal(err)
+	} else {
+		scoped, err := http.NewRequest(http.MethodGet, srv.URL+"/v1/models", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		scoped.Header.Set("Authorization", "Bearer "+chatOnly)
+		scopedResp, err := http.DefaultClient.Do(scoped)
+		if err != nil {
+			t.Fatal(err)
+		}
+		scopedBody, _ := io.ReadAll(scopedResp.Body)
+		_ = scopedResp.Body.Close()
+		if scopedResp.StatusCode != http.StatusForbidden || !strings.Contains(string(scopedBody), "insufficient_scope") {
+			t.Fatalf("chat-only key status=%d body=%s", scopedResp.StatusCode, scopedBody)
+		}
 	}
 
 	chat, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{"model":"missing","messages":[{"role":"user","content":"hello"}]}`))

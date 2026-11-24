@@ -484,7 +484,7 @@ sys.argv = [
 async def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--server-url", default="ws://127.0.0.1:18080/api/llm/ws/worker")
-    parser.add_argument("--token", default=os.environ.get("WORKER_AUTH_TOKEN") or "omni-secret-key-123")
+    parser.add_argument("--token", default=( __import__("os").environ.get("WORKER_AUTH_TOKEN") or __import__("sys").exit("set WORKER_AUTH_TOKEN in the environment") ))
     parser.add_argument("--token-dir", type=Path, default=Path(os.path.expanduser("~/.config/colab-cli")))
     parser.add_argument("--db-path", default="data/local-smoke.db")
     parser.add_argument("--status", action="store_true", help="Print account states and exit")

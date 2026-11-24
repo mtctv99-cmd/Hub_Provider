@@ -164,10 +164,14 @@ def start_worker_process(
 def verify_workerhub_registration(server_base: str, worker_id: str, timeout: float = 15.0) -> bool:
     """Poll Server /v1/models and check if worker is active."""
     url = f"{server_base.rstrip('/')}/v1/models"
+    # The catalog is public, but a supplied key is validated by the gateway, so
+    # only send one when the environment provides a valid key.
+    key = os.environ.get("COLAB_WORKER_KEY") or os.environ.get("SEVER_API_KEY", "")
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
     start = time.time()
     while time.time() - start < timeout:
         try:
-            req = urllib.request.Request(url, headers={"Authorization": "Bearer omni-secret-key-123"})
+            req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=3.0) as r:
                 data = json.loads(r.read().decode("utf-8"))
                 models = [m.get("id") for m in data.get("data", [])]
@@ -186,7 +190,7 @@ def main():
     parser.add_argument("--token-dir", default=str(TOKEN_DIR), help="Colab token directory")
     parser.add_argument("--server", default="ws://127.0.0.1:18080/api/llm/ws/worker", help="WorkerHub WebSocket endpoint")
     parser.add_argument("--worker-id", default="colab-t4-tts-worker", help="Worker ID to register")
-    parser.add_argument("--token", default="omni-secret-key-123", help="Worker authentication token")
+    parser.add_argument("--token", default=( __import__("os").environ.get("WORKER_AUTH_TOKEN") or __import__("sys").exit("set WORKER_AUTH_TOKEN in the environment") ), help="Worker authentication token")
     parser.add_argument("--concurrency", type=int, default=20, help="Max concurrency slots (default: 20)")
     parser.add_argument("--models-dir", default="models", help="Local/remote models directory")
     parser.add_argument("--no-detach", action="store_true", help="Keep running in foreground")

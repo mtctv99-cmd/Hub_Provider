@@ -37,6 +37,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 REMOTE_WORKER_SCRIPT = REPO_ROOT / 'colab' / 'remote_worker.py'
 VLLM_WORKER_SCRIPT = REPO_ROOT / 'colab' / 'vllm_worker.py'
 COMBINED_WORKER_SCRIPT = REPO_ROOT / 'colab' / 'combined_worker.py'
+VIDEO_WORKER_SCRIPT = REPO_ROOT / 'colab' / 'video_worker.py'
+OMNIVOICE_WORKER_SCRIPT = REPO_ROOT / 'colab' / 'omnivoice_worker.py'
 
 # Last-known-good on T4 (Sep 2026): gemma-4 E2B heretic Q4_K_M via llama.cpp.
 DEFAULT_MODEL = os.environ.get('COLAB_MODEL', 'gemma-4-colab')
@@ -49,6 +51,8 @@ DEFAULT_LLM_CONCURRENCY = 8
 
 
 def check_warp_proxy():
+    if os.environ.get('COLAB_NO_WARP') == '1':
+        return None
     try:
         r = subprocess.run(['warp-cli', 'status'], capture_output=True, text=True, timeout=3)
         if 'Connected' in r.stdout:
@@ -132,7 +136,8 @@ COMBINED_CONFIG_PATH = '/content/combined_models.yaml'
 
 def do_start(account_id, token_dir, server_url, worker_token, worker_type='combined',
              context_size=DEFAULT_CONTEXT_SIZE, llm_concurrency=DEFAULT_LLM_CONCURRENCY,
-             repo_id=None, filename=None, mmproj=None, model_name=None, aliases=None):
+             repo_id=None, filename=None, mmproj=None, model_name=None, aliases=None,
+             video_backend='wan', video_size=None, video_max_frames=None):
     token_file = resolve_token_file(token_dir, account_id)
     if not token_file:
         LOG.error('Token file not found for account %s in %s', account_id, token_dir)
@@ -164,9 +169,32 @@ def do_start(account_id, token_dir, server_url, worker_token, worker_type='combi
     except Exception as e:
         LOG.warning('[%s] list_assignments warning: %s', email, e)
 
-    # 2. Assign fresh T4 GPU session
-    LOG.info('[%s] Requesting fresh T4 GPU session from Google Colab...', email)
-    active_assignment = client.assign(uuid.uuid4(), variant=Variant.GPU, accelerator=Accelerator.T4)
+    # 2. Assign fresh T4 GPU session. Colab intermittently answers 503 or lets
+    # the assign POST read-timeout; retry instead of dying on the first blip.
+    active_assignment = None
+    for attempt in range(1, 6):
+        LOG.info('[%s] Requesting fresh T4 GPU session from Google Colab (attempt %d)...', email, attempt)
+        try:
+            active_assignment = client.assign(uuid.uuid4(), variant=Variant.GPU, accelerator=Accelerator.T4)
+            break
+        except Exception as e:
+            transient = any(k in type(e).__name__ + str(e) for k in
+                            ('ReadTimeout', 'Service Unavailable', 'ConnectionError', 'RemoteDisconnected'))
+            if not transient and 'TooManyAssignments' in type(e).__name__:
+                LOG.warning('[%s] stale assignment detected; clearing', email)
+                try:
+                    for a in client.list_assignments():
+                        client.unassign(a.endpoint)
+                except Exception as clear_err:
+                    LOG.warning('[%s] clear failed: %s', email, clear_err)
+                transient = True
+            if not transient or attempt == 5:
+                raise
+            LOG.warning('[%s] assign failed (%s: %s); retrying', email, type(e).__name__, str(e)[:120])
+            time.sleep(20 * attempt)
+    if active_assignment is None:
+        LOG.error('[%s] no T4 assignment after retries', email)
+        sys.exit(1)
     LOG.info('[%s] Session assigned: %s', email, active_assignment.endpoint)
 
     url = active_assignment.runtime_proxy_info.url
@@ -177,7 +205,11 @@ def do_start(account_id, token_dir, server_url, worker_token, worker_type='combi
     worker_id = f"colab-{uuid.uuid4().hex[:6]}"
 
     # Pick script to inject
-    if worker_type == 'vllm' and VLLM_WORKER_SCRIPT.is_file():
+    if worker_type == 'omnivoice' and OMNIVOICE_WORKER_SCRIPT.is_file():
+        target_script = OMNIVOICE_WORKER_SCRIPT
+    elif worker_type == 'video' and VIDEO_WORKER_SCRIPT.is_file():
+        target_script = VIDEO_WORKER_SCRIPT
+    elif worker_type == 'vllm' and VLLM_WORKER_SCRIPT.is_file():
         target_script = VLLM_WORKER_SCRIPT
     elif worker_type == 'llama' or not COMBINED_WORKER_SCRIPT.is_file():
         target_script = REMOTE_WORKER_SCRIPT
@@ -189,7 +221,29 @@ def do_start(account_id, token_dir, server_url, worker_token, worker_type='combi
 
     hf_token = os.environ.get('HF_TOKEN', '')
     preamble_config = ''
-    if worker_type == 'combined':
+    if worker_type == 'omnivoice':
+        argv_repr = [
+            'omnivoice_worker',
+            '--server-url', str(server_url),
+            '--worker-id', str(worker_id),
+            '--api-key', str(worker_token),
+            '--model', model_name or 'piper:omnivoice_vi',
+        ]
+    elif worker_type == 'video':
+        backend = video_backend or 'wan'
+        default_size = '704x480' if backend == 'ltx' else '832x480'
+        default_frames = 121 if backend == 'ltx' else 49
+        argv_repr = [
+            'video_worker',
+            '--server-url', str(server_url),
+            '--worker-id', str(worker_id),
+            '--api-key', str(worker_token),
+            '--backend', backend,
+            '--model', model_name or ('ltx-video-2b' if backend == 'ltx' else 'wan-2.1-1.3b'),
+            '--size', video_size or default_size,
+            '--max-frames', str(video_max_frames or default_frames),
+        ]
+    elif worker_type == 'combined':
         argv_repr = [
             'combined_worker',
             '--server', str(server_url),
@@ -344,7 +398,8 @@ sys.argv = {argv_repr!r}
                     tb = ''.join(out.get('traceback', []))
                     LOG.error('[%s] Colab error: %s', email, tb[-1500:])
 
-            runtime.execute_code(injected_code, timeout=1800, output_hook=output_hook)
+            runtime.execute_code(injected_code, timeout=7200 if worker_type == 'video' else 1800,
+                                 output_hook=output_hook)
         except Exception as e:
             if not stop_event.is_set():
                 LOG.error('[%s] Execution error: %s', email, e)
@@ -375,7 +430,9 @@ sys.argv = {argv_repr!r}
     LOG.info('[%s] Waiting for Colab worker to register with Server...', email)
     # Cold boot takes long: vllm pip install + model load 10-20 min,
     # combined (llama-cpp CUDA + GGUF + 3 TTS voices) up to ~30 min.
-    ready_timeout = 1800.0 if worker_type == 'combined' else 1200.0
+    # 20 minutes was too tight for llama downloads on slow T4 hosts and caused
+    # avoidable supervisor churn; default to 30 minutes and allow an override.
+    ready_timeout = float(os.environ.get('COLAB_READY_TIMEOUT_SEC', '1800'))
     ready_event.wait(timeout=ready_timeout)
     if ready_event.is_set():
         LOG.info('Colab worker %s online and registered successfully.', worker_id)
@@ -427,7 +484,10 @@ def main():
     parser.add_argument('--token-dir', default=os.environ.get('COLAB_TOKEN_DIR') or str(Path.home() / '.config' / 'colab-cli'))
     parser.add_argument('--server', default=os.environ.get('COLAB_SERVER_URL') or os.environ.get('PIPER_SERVER_URL') or 'ws://127.0.0.1:18080/api/llm/ws/worker')
     parser.add_argument('--token', default=os.environ.get('WORKER_TOKEN') or os.environ.get('WORKER_AUTH_TOKEN') or '', help='Worker auth token (required, no insecure default)')
-    parser.add_argument('--worker-type', default=os.environ.get('COLAB_WORKER_TYPE', 'llama'), choices=['combined', 'vllm', 'llama'])
+    parser.add_argument('--worker-type', default=os.environ.get('COLAB_WORKER_TYPE', 'llama'), choices=['combined', 'vllm', 'llama', 'video', 'omnivoice'])
+    parser.add_argument('--video-backend', default=os.environ.get('VIDEO_BACKEND', 'wan'), choices=['wan', 'ltx'])
+    parser.add_argument('--video-size', default=os.environ.get('VIDEO_SIZE'))
+    parser.add_argument('--video-max-frames', type=int, default=int(os.environ.get('VIDEO_MAX_FRAMES', '0')) or None)
     parser.add_argument('--context-size', type=int, default=DEFAULT_CONTEXT_SIZE)
     parser.add_argument('--llm-concurrency', type=int, default=DEFAULT_LLM_CONCURRENCY)
     parser.add_argument('--repo-id', default=None, help='GGUF repo (llama worker)')
@@ -445,7 +505,9 @@ def main():
                  worker_type=args.worker_type, context_size=args.context_size,
                  llm_concurrency=args.llm_concurrency, repo_id=args.repo_id,
                  filename=args.filename, mmproj=args.mmproj,
-                 model_name=args.model_name, aliases=args.alias)
+                 model_name=args.model_name, aliases=args.alias,
+                 video_backend=args.video_backend, video_size=args.video_size,
+                 video_max_frames=args.video_max_frames)
     elif args.action == 'stop':
         do_stop(args.account_id, args.token_dir)
     elif args.action == 'rotate':
@@ -454,7 +516,9 @@ def main():
                  worker_type=args.worker_type, context_size=args.context_size,
                  llm_concurrency=args.llm_concurrency, repo_id=args.repo_id,
                  filename=args.filename, mmproj=args.mmproj,
-                 model_name=args.model_name, aliases=args.alias)
+                 model_name=args.model_name, aliases=args.alias,
+                 video_backend=args.video_backend, video_size=args.video_size,
+                 video_max_frames=args.video_max_frames)
 
 
 if __name__ == '__main__':

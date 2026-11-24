@@ -16,7 +16,7 @@ except Exception:
     sys.exit(1)
 
 DB_PATH = "/media/reup/Data_sv4/Sever_provider/data/orchestrator.db"
-MASTER_KEY = bytes.fromhex("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+MASTER_KEY = bytes.fromhex(( __import__("os").environ.get("MASTER_KEY") or __import__("sys").exit("set MASTER_KEY in the environment") ))
 PROFILES_BASE = Path("/media/reup/Data_sv4/Sever_provider/data/profiles/deepseek")
 PROFILES_BASE.mkdir(parents=True, exist_ok=True)
 

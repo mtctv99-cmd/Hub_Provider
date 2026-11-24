@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,7 +19,7 @@ func TestParseImageData(t *testing.T) {
 	b64 := base64.StdEncoding.EncodeToString(dummy)
 	dataURL := "data:image/png;base64," + b64
 
-	data, filename, mimeType, err := ParseImageData(dataURL)
+	data, filename, mimeType, err := ParseImageData(context.Background(), dataURL)
 	if err != nil {
 		t.Fatalf("ParseImageData failed: %v", err)
 	}
@@ -33,14 +34,14 @@ func TestParseImageData(t *testing.T) {
 	}
 
 	// 2. Invalid data URL (missing comma)
-	_, _, _, err = ParseImageData("data:image/png;base64")
+	_, _, _, err = ParseImageData(context.Background(), "data:image/png;base64")
 	if err == nil {
 		t.Errorf("expected error for missing comma in data URL")
 	}
 
 	// 3. Oversized image rejection
 	hugePayload := strings.Repeat("A", (maxImageBytes+100)*4/3)
-	_, _, _, err = ParseImageData("data:image/png;base64," + hugePayload)
+	_, _, _, err = ParseImageData(context.Background(), "data:image/png;base64,"+hugePayload)
 	if err == nil {
 		t.Errorf("expected error for oversized image")
 	}
@@ -163,5 +164,28 @@ func TestChatWithImageUploadFlow(t *testing.T) {
 	}
 	if resp.Upstream.ConversationID != "c_vision" || resp.Upstream.ResponseID != "r_vision" || resp.Upstream.ChoiceID != "rc_vision" {
 		t.Fatalf("unexpected upstream state: %+v", resp.Upstream)
+	}
+}
+
+func TestParseImageDataRejectsSSRF(t *testing.T) {
+	// Remote image URLs are attacker-controlled: private/loopback/link-local
+	// hosts, IP literals and unusual ports must fail before any request leaves.
+	for _, raw := range []string{
+		"https://127.0.0.1/x.png",
+		"https://169.254.169.254/latest/meta-data",
+		"https://10.0.0.1/x.png",
+		"https://192.168.1.1/x.png",
+		"https://100.64.0.1/x.png",
+		"https://localhost/x.png",
+		"https://app.localhost/x.png",
+		"https://internal-host/x.png",
+		"https://example.com:8080/x.png",
+		"https://user:pass@example.com/x.png",
+		"file:///etc/passwd",
+		"ftp://example.com/x.png",
+	} {
+		if _, _, _, err := ParseImageData(context.Background(), raw); !errors.Is(err, provider.ErrInvalidImageURL) {
+			t.Fatalf("%s: err=%v, want ErrInvalidImageURL", raw, err)
+		}
 	}
 }

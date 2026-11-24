@@ -152,7 +152,7 @@ func TestChatImageGenerationStreams(t *testing.T) {
 	h := newImageTestHandler(t, []scheduler.ModelSpec{{ID: "img", Provider: "mock", Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityImage}, TimeoutSec: 5}}, &countingChatMock{data: []byte("png")}, store)
 	r := postChat(t, h, `{"model":"img","messages":[{"role":"user","content":"draw a cat"}],"image_generation":true,"stream":true}`)
 	body := r.Body.String()
-	if r.Code != http.StatusOK || r.Header().Get("Content-Type") != "text/event-stream" {
+	if r.Code != http.StatusOK || !strings.HasPrefix(r.Header().Get("Content-Type"), "text/event-stream") {
 		t.Fatalf("status=%d content-type=%q body=%s", r.Code, r.Header().Get("Content-Type"), body)
 	}
 	if !strings.Contains(body, "data:image/png;base64,cG5n") || !strings.Contains(body, "image_url") || !strings.Contains(body, "/v1/files/") || !strings.Contains(body, "[DONE]") {

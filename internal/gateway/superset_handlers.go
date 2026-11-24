@@ -18,6 +18,7 @@ import (
 	"sever_provider/internal/provider"
 	"sever_provider/internal/provider/piper"
 	"sever_provider/internal/scheduler"
+	"sever_provider/internal/tenant"
 )
 
 func (h *Handler) AnthropicMessages(w http.ResponseWriter, r *http.Request) {
@@ -34,9 +35,20 @@ func (h *Handler) AnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "model and messages are required", "invalid_request_error", "missing_parameter")
 		return
 	}
+	setAccessLogModel(r, req.Model)
+	if req.ToolChoice != nil && req.ToolChoice.Type == "tool" && !anthropicToolConfigured(req.Tools, req.ToolChoice.Name) {
+		writeError(w, 400, "tool_choice references an unknown tool", "invalid_request_error", "tool_not_found")
+		return
+	}
 	if !h.applyReasoningAlias(w, req.Model, &req.ReasoningEffort) {
 		return
 	}
+	stop, stopErr := validateStop(req.StopSequences)
+	if stopErr != nil {
+		writeError(w, http.StatusBadRequest, stopErr.Error(), "invalid_request_error", "invalid_stop")
+		return
+	}
+	req.StopSequences = stop
 	hasImages := false
 	for _, message := range req.Messages {
 		if message.HasImages() {
@@ -61,13 +73,37 @@ func (h *Handler) AnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	if sessionID != "" {
 		w.Header().Set("X-Session-ID", sessionID)
 	}
-	chatReq := provider.ChatRequest{Model: req.Model, ReasoningEffort: req.ReasoningEffort, SessionID: sessionID, Messages: req.Messages, MaxTokens: req.MaxTokens, Stream: req.Stream}
+	messages := req.Messages
+	if sys := anthropicSystemText(req.System); sys != "" {
+		messages = append([]provider.Message{{Role: "system", Content: sys}}, messages...)
+	}
+	chatReq := provider.ChatRequest{
+		Model:           req.Model,
+		ReasoningEffort: req.ReasoningEffort,
+		SessionID:       sessionID,
+		Messages:        messages,
+		Tools:           anthropicToolsToProvider(req.Tools),
+		ToolChoice:      anthropicToolChoiceToProvider(req.ToolChoice),
+		MaxTokens:       req.MaxTokens,
+		Stop:            req.StopSequences,
+		Stream:          req.Stream,
+	}
 	if req.Stream {
 		h.streamAnthropic(w, r.Context(), chatReq)
 		return
 	}
 	resp, err := h.Dispatcher.Chat(r.Context(), chatReq)
+	stopReason := "end_turn"
 	if err == nil {
+		lim := newOutputLimiter(chatReq.Stop, chatReq.MaxTokens)
+		resp.Content = lim.feed(resp.Content) + lim.flush()
+		if lim.truncated {
+			stopReason = "max_tokens"
+		} else if lim.stopped {
+			stopReason = "stop_sequence"
+		} else if len(resp.ToolCalls) > 0 {
+			stopReason = "tool_use"
+		}
 		resp.Usage = provider.ComputeUsage(chatReq.Messages, chatReq.Tools, resp.Content, resp.ReasoningContent, resp.ToolCalls, &resp.Usage)
 		h.AITokens.Add(uint64(resp.Usage.TotalTokens))
 		if h.Traffic != nil && resp.Usage.TotalTokens > 0 {
@@ -105,15 +141,37 @@ func (h *Handler) AnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	var contentBlocks []map[string]any
 	if resp.ReasoningContent != "" {
 		contentBlocks = append(contentBlocks, map[string]any{
-			"type":     "thinking",
-			"thinking": resp.ReasoningContent,
+			"type":      "thinking",
+			"thinking":  resp.ReasoningContent,
+			"signature": "",
 		})
 	}
-	contentBlocks = append(contentBlocks, map[string]any{
-		"type": "text",
-		"text": resp.Content,
+	// A tool-only turn carries no text block; a truncated turn keeps the partial
+	// text and drops the tool calls, whose arguments would be incomplete.
+	if resp.Content != "" || len(resp.ToolCalls) == 0 {
+		contentBlocks = append(contentBlocks, map[string]any{
+			"type": "text",
+			"text": resp.Content,
+		})
+	}
+	if stopReason == "tool_use" {
+		for _, tc := range resp.ToolCalls {
+			contentBlocks = append(contentBlocks, anthropicToolUseBlock(tc))
+		}
+	}
+	writeJSON(w, 200, map[string]any{
+		"id":            resp.ID,
+		"type":          "message",
+		"role":          "assistant",
+		"model":         req.Model,
+		"content":       contentBlocks,
+		"stop_reason":   stopReason,
+		"stop_sequence": nil,
+		"usage": map[string]any{
+			"input_tokens":  resp.Usage.PromptTokens,
+			"output_tokens": resp.Usage.CompletionTokens,
+		},
 	})
-	writeJSON(w, 200, map[string]any{"id": resp.ID, "type": "message", "role": "assistant", "model": req.Model, "content": contentBlocks, "stop_reason": "end_turn", "usage": resp.Usage})
 }
 
 func (h *Handler) streamAnthropic(w http.ResponseWriter, ctx context.Context, req provider.ChatRequest) {
@@ -128,23 +186,58 @@ func (h *Handler) streamAnthropic(w http.ResponseWriter, ctx context.Context, re
 		writeError(w, http.StatusInternalServerError, "streaming unsupported", "server_error", "streaming_unsupported")
 		return
 	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
+	setSSEHeaders(w)
 	id := "msg_" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	send := func(event string, payload any) {
 		b, _ := json.Marshal(payload)
 		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
 		flusher.Flush()
 	}
-	send("message_start", map[string]any{"type": "message_start", "message": map[string]any{"id": id, "type": "message", "role": "assistant", "model": req.Model, "content": []any{}, "stop_reason": nil}})
+	inputTokens := provider.ComputeUsage(req.Messages, req.Tools, "", "", nil, nil).PromptTokens
+	send("message_start", map[string]any{"type": "message_start", "message": map[string]any{
+		"id": id, "type": "message", "role": "assistant", "model": req.Model, "content": []any{}, "stop_reason": nil,
+		"usage": map[string]any{"input_tokens": inputTokens, "output_tokens": 0},
+	}})
 	thinkingStarted := false
+	thinkingOpen := false
 	textStarted := false
 	blockIndex := 0
 	var streamContent strings.Builder
 	var streamReasoning strings.Builder
 	var streamToolCalls []provider.ToolCall
 	var streamUsage *provider.Usage
+	lim := newOutputLimiter(req.Stop, req.MaxTokens)
+	// finish closes the open block, emits any tool_use blocks gathered from the
+	// Done chunk and terminates the message. Adapters buffer tool calls and
+	// release them whole on the final chunk, so one input_json_delta per call is
+	// enough. Truncated turns never emit tool_use: their arguments may be cut.
+	finish := func(stopReason string, toks provider.Usage) {
+		if thinkingOpen {
+			// Anthropic typed SDKs require a signature on every thinking block;
+			// web providers expose no signature, so emit an empty one.
+			send("content_block_delta", map[string]any{"type": "content_block_delta", "index": blockIndex, "delta": map[string]any{"type": "signature_delta", "signature": ""}})
+			thinkingOpen = false
+		}
+		if thinkingStarted || textStarted {
+			send("content_block_stop", map[string]any{"type": "content_block_stop", "index": blockIndex})
+			blockIndex++
+		}
+		if stopReason == "tool_use" {
+			for _, tc := range streamToolCalls {
+				partial, _ := json.Marshal(toolInputObject(tc.Function.Arguments))
+				send("content_block_start", map[string]any{"type": "content_block_start", "index": blockIndex, "content_block": map[string]any{"type": "tool_use", "id": tc.ID, "name": tc.Function.Name, "input": map[string]any{}}})
+				send("content_block_delta", map[string]any{"type": "content_block_delta", "index": blockIndex, "delta": map[string]any{"type": "input_json_delta", "partial_json": string(partial)}})
+				send("content_block_stop", map[string]any{"type": "content_block_stop", "index": blockIndex})
+				blockIndex++
+			}
+		}
+		send("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": stopReason, "stop_sequence": nil}, "usage": map[string]any{"output_tokens": toks.CompletionTokens}})
+		send("message_stop", map[string]any{"type": "message_stop"})
+		h.AITokens.Add(uint64(toks.TotalTokens))
+		if h.Traffic != nil && toks.TotalTokens > 0 {
+			go func(tok int) { _ = h.Traffic.RecordMetrics(context.Background(), time.Now(), 0, int64(tok), 0) }(toks.TotalTokens)
+		}
+	}
 	for chunk := range stream {
 		if chunk.Err != nil {
 			status, msg, code := maskProviderError(chunk.Err)
@@ -152,7 +245,17 @@ func (h *Handler) streamAnthropic(w http.ResponseWriter, ctx context.Context, re
 			_ = status
 			return
 		}
-		streamContent.WriteString(chunk.Content)
+		content := chunk.Content
+		if lim != nil {
+			content = lim.feed(content)
+			if chunk.Done {
+				content += lim.flush()
+			}
+			if lim.Done() && content == "" && !chunk.Done {
+				continue
+			}
+		}
+		streamContent.WriteString(content)
 		streamReasoning.WriteString(chunk.ReasoningContent)
 		if len(chunk.ToolCalls) > 0 {
 			streamToolCalls = append(streamToolCalls, chunk.ToolCalls...)
@@ -163,12 +266,17 @@ func (h *Handler) streamAnthropic(w http.ResponseWriter, ctx context.Context, re
 		if chunk.ReasoningContent != "" {
 			if !thinkingStarted {
 				thinkingStarted = true
+				thinkingOpen = true
 				send("content_block_start", map[string]any{"type": "content_block_start", "index": blockIndex, "content_block": map[string]any{"type": "thinking", "thinking": ""}})
 			}
 			send("content_block_delta", map[string]any{"type": "content_block_delta", "index": blockIndex, "delta": map[string]any{"type": "thinking_delta", "thinking": chunk.ReasoningContent}})
 		}
-		if chunk.Content != "" {
+		if content != "" {
 			if thinkingStarted && !textStarted {
+				if thinkingOpen {
+					send("content_block_delta", map[string]any{"type": "content_block_delta", "index": blockIndex, "delta": map[string]any{"type": "signature_delta", "signature": ""}})
+					thinkingOpen = false
+				}
 				send("content_block_stop", map[string]any{"type": "content_block_stop", "index": blockIndex})
 				blockIndex++
 			}
@@ -176,28 +284,32 @@ func (h *Handler) streamAnthropic(w http.ResponseWriter, ctx context.Context, re
 				textStarted = true
 				send("content_block_start", map[string]any{"type": "content_block_start", "index": blockIndex, "content_block": map[string]any{"type": "text", "text": ""}})
 			}
-			send("content_block_delta", map[string]any{"type": "content_block_delta", "index": blockIndex, "delta": map[string]any{"type": "text_delta", "text": chunk.Content}})
+			send("content_block_delta", map[string]any{"type": "content_block_delta", "index": blockIndex, "delta": map[string]any{"type": "text_delta", "text": content}})
 		}
 		if chunk.Done {
-			if !thinkingStarted && !textStarted {
-				send("content_block_start", map[string]any{"type": "content_block_start", "index": 0, "content_block": map[string]any{"type": "text", "text": ""}})
-				textStarted = true
+			stopReason := "end_turn"
+			switch {
+			case lim.truncated:
+				stopReason = "max_tokens"
+			case lim.stopped:
+				stopReason = "stop_sequence"
+			case len(streamToolCalls) > 0:
+				stopReason = "tool_use"
 			}
-			send("content_block_stop", map[string]any{"type": "content_block_stop", "index": blockIndex})
-			send("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": "end_turn", "stop_sequence": nil}, "usage": usageOrEmpty(chunk.Usage)})
-			send("message_stop", map[string]any{"type": "message_stop"})
-			toks := provider.ComputeUsage(req.Messages, req.Tools, streamContent.String(), streamReasoning.String(), streamToolCalls, streamUsage)
-			h.AITokens.Add(uint64(toks.TotalTokens))
-			if h.Traffic != nil && toks.TotalTokens > 0 {
-				go func(tok int) { _ = h.Traffic.RecordMetrics(context.Background(), time.Now(), 0, int64(tok), 0) }(toks.TotalTokens)
-			}
+			finish(stopReason, provider.ComputeUsage(req.Messages, req.Tools, streamContent.String(), streamReasoning.String(), streamToolCalls, streamUsage))
 			return
 		}
 	}
-	if textStarted || thinkingStarted {
-		send("content_block_stop", map[string]any{"type": "content_block_stop", "index": blockIndex})
+	stopReason := "end_turn"
+	switch {
+	case lim.truncated:
+		stopReason = "max_tokens"
+	case lim.stopped:
+		stopReason = "stop_sequence"
+	case len(streamToolCalls) > 0:
+		stopReason = "tool_use"
 	}
-	send("message_stop", map[string]any{"type": "message_stop"})
+	finish(stopReason, provider.ComputeUsage(req.Messages, req.Tools, streamContent.String(), streamReasoning.String(), streamToolCalls, streamUsage))
 }
 
 func (h *Handler) VideoGenerations(w http.ResponseWriter, r *http.Request) {
@@ -214,6 +326,7 @@ func (h *Handler) VideoGenerations(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "model and prompt are required", "invalid_request_error", "missing_parameter")
 		return
 	}
+	setAccessLogModel(r, req.Model)
 	if h.Models == nil {
 		writeError(w, 503, "model registry is unavailable", "server_error", "models_unavailable")
 		return
@@ -237,7 +350,7 @@ func (h *Handler) VideoGenerations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload, _ := json.Marshal(req)
-	job := &jobstore.Job{Type: "video", Kind: "video", Model: req.Model, Payload: payload, InputJSON: string(payload)}
+	job := &jobstore.Job{Type: "video", Kind: "video", Model: req.Model, OwnerKeyID: tenant.ID(r.Context()), Payload: payload, InputJSON: string(payload)}
 	if err := h.Jobs.Create(r.Context(), job); err != nil {
 		if h.AuditLog != nil {
 			_ = h.AuditLog.Record(r.Context(), admin.AuditEvent{
@@ -287,7 +400,12 @@ func (h *Handler) VideoTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "video task not found", "invalid_request_error", "not_found")
 		return
 	}
-	writeJSON(w, 200, job)
+	if !jobOwnedByRequest(r, job) {
+		writeError(w, http.StatusNotFound, "video task not found", "invalid_request_error", "not_found")
+		return
+	}
+	setAccessLogModel(r, job.Model)
+	writeJobResponse(w, job)
 }
 
 func (h *Handler) Files(w http.ResponseWriter, r *http.Request) {
@@ -419,6 +537,7 @@ func (h *Handler) TTSGenerate(w http.ResponseWriter, r *http.Request) {
 	if req.Engine == "tiktok" || strings.HasPrefix(req.VoiceID, "BV") || req.VoiceID == "vi_male" {
 		model = "tiktok:" + req.VoiceID
 	}
+	setAccessLogModel(r, model)
 	if h.Models == nil {
 		writeError(w, 503, "model registry is unavailable", "server_error", "models_unavailable")
 		return
@@ -448,7 +567,7 @@ func (h *Handler) TTSGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	h.recordVoiceRequest(req.VoiceID)
 	payload, _ := json.Marshal(req)
-	job := &jobstore.Job{Type: "tts", Kind: "tts", Model: model, Engine: req.Engine, Payload: payload, InputJSON: string(payload)}
+	job := &jobstore.Job{Type: "tts", Kind: "tts", Model: model, Engine: req.Engine, OwnerKeyID: tenant.ID(r.Context()), Payload: payload, InputJSON: string(payload)}
 	if err := h.Jobs.Create(r.Context(), job); err != nil {
 		if h.AuditLog != nil {
 			_ = h.AuditLog.Record(r.Context(), admin.AuditEvent{
@@ -489,6 +608,10 @@ func (h *Handler) TTSJob(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if !jobOwnedByRequest(r, job) {
+		http.NotFound(w, r)
+		return
+	}
 	if strings.HasSuffix(r.URL.Path, "/audio") {
 		if job.Status != jobstore.COMPLETED || job.OutputPath == "" || h.MediaStore == nil {
 			writeError(w, http.StatusConflict, "audio is not ready", "invalid_request_error", "audio_not_ready")
@@ -504,7 +627,8 @@ func (h *Handler) TTSJob(w http.ResponseWriter, r *http.Request) {
 		http.ServeContent(w, r, id, time.Time{}, f)
 		return
 	}
-	writeJSON(w, 200, job)
+	setAccessLogModel(r, job.Model)
+	writeJobResponse(w, job)
 }
 
 func (h *Handler) LLMJobCreate(w http.ResponseWriter, r *http.Request) {
@@ -521,12 +645,13 @@ func (h *Handler) LLMJobCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "prompt is required", "invalid_request_error", "missing_parameter")
 		return
 	}
+	setAccessLogModel(r, req.Model)
 	if h.Jobs == nil {
 		writeError(w, 503, "job store is unavailable", "server_error", "job_store_unavailable")
 		return
 	}
 	payload, _ := json.Marshal(req)
-	job := &jobstore.Job{Type: "llm", Kind: "chat", Model: req.Model, Payload: payload, InputJSON: string(payload)}
+	job := &jobstore.Job{Type: "llm", Kind: "chat", Model: req.Model, OwnerKeyID: tenant.ID(r.Context()), Payload: payload, InputJSON: string(payload)}
 	if err := h.Jobs.Create(r.Context(), job); err != nil {
 		if h.AuditLog != nil {
 			_ = h.AuditLog.Record(r.Context(), admin.AuditEvent{
@@ -568,7 +693,12 @@ func (h *Handler) LLMJob(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	writeJSON(w, 200, job)
+	if !jobOwnedByRequest(r, job) {
+		http.NotFound(w, r)
+		return
+	}
+	setAccessLogModel(r, job.Model)
+	writeJobResponse(w, job)
 }
 
 func (h *Handler) WorkerWebSocket(w http.ResponseWriter, r *http.Request) {
@@ -577,4 +707,24 @@ func (h *Handler) WorkerWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.Workers.ServeHTTP(w, r)
+}
+
+// anthropicSystemText flattens the Anthropic "system" field (a string or an
+// array of text blocks) into plain text.
+func anthropicSystemText(v any) string {
+	switch s := v.(type) {
+	case string:
+		return strings.TrimSpace(s)
+	case []any:
+		var parts []string
+		for _, item := range s {
+			if m, ok := item.(map[string]any); ok {
+				if t, ok := m["text"].(string); ok && strings.TrimSpace(t) != "" {
+					parts = append(parts, strings.TrimSpace(t))
+				}
+			}
+		}
+		return strings.Join(parts, "\n\n")
+	}
+	return ""
 }

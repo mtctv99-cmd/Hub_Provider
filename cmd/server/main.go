@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -44,7 +45,7 @@ import (
 )
 
 func main() {
-	log.Printf("Sever Provider %s starting", buildinfo.Version)
+	log.Printf("Sever Provider version=%s commit=%s starting", buildinfo.Version, buildinfo.Commit)
 	configDir := flag.String("config", "config", "config directory")
 	refreshProfiles := flag.String("refresh-google-profiles", "", "refresh only the comma-separated Google profile IDs, then exit")
 	flag.Parse()
@@ -105,6 +106,22 @@ func main() {
 		return
 	}
 	defer database.Close()
+	// H7 fail-fast: binding a public interface with no static key and an empty
+	// api_keys table would leave every consumer endpoint unauthenticated.
+	// Existing deployments with DB-managed keys keep working unchanged.
+	apiKeys := admin.NewAPIKeys(database.DB)
+	if strings.TrimSpace(cfg.Server.APIKey) == "" {
+		keyCount, countErr := countAPIKeys(context.Background(), database.DB)
+		if countErr != nil {
+			fmt.Fprintf(os.Stderr, "refusing to start: server.api_key is empty and api_keys could not be verified: %v\n", countErr)
+			os.Exit(1)
+		}
+		if keyCount == 0 {
+			fmt.Fprintln(os.Stderr, "refusing to start: server.api_key is empty and the api_keys table has no rows; set server.api_key or create an API key so consumer endpoints are not unauthenticated")
+			os.Exit(1)
+		}
+		log.Printf("[startup] server.api_key is empty; consumer auth relies on %d key(s) in the api_keys table", keyCount)
+	}
 	identityManager := identity.NewManager(database.DB, secretStore)
 	if err := warnUndecryptableGoogleSecrets(context.Background(), identityManager); err != nil {
 		log.Printf("[startup] google secret self-check failed: %v", err)
@@ -181,13 +198,32 @@ func main() {
 	handler.SetWorkers(workers)
 	adminAuth, err := admin.NewFromEnvWithDB(database.DB)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "admin auth init failed: %v\n", err)
-		return
+		if errors.Is(err, admin.ErrNotConfigured) {
+			fmt.Fprintln(os.Stderr, "admin auth is not configured: set ADMIN_PASSWORD to a strong password and restart")
+		} else {
+			fmt.Fprintf(os.Stderr, "admin auth init failed: %v\n", err)
+		}
+		os.Exit(2)
+	}
+	if adminAuth.UsesDefaultPassword() {
+		// Never serve a deployment that still accepts the shipped default password.
+		envPassword := strings.TrimSpace(os.Getenv("ADMIN_PASSWORD"))
+		if envPassword == "" {
+			fmt.Fprintln(os.Stderr, "admin auth still uses the default password: set ADMIN_PASSWORD and restart")
+			os.Exit(2)
+		}
+		if err := adminAuth.ApplyEnvPassword(envPassword); err != nil {
+			fmt.Fprintf(os.Stderr, "admin password bootstrap failed: %v\n", err)
+			os.Exit(2)
+		}
+		log.Printf("[startup] replaced default admin password from ADMIN_PASSWORD; change it at the next login")
 	}
 	handler.SetAdminAuth(adminAuth)
-	handler.SetAPIKeys(admin.NewAPIKeys(database.DB))
+	handler.SetAPIKeys(apiKeys)
 	handler.SetAudit(admin.NewAuditLogger(database.DB))
 	handler.Traffic = gateway.NewTrafficStore(database.DB)
+	// Deferred after database.Close (LIFO), so the final traffic flush still sees an open DB.
+	defer handler.Traffic.Close()
 	colabTokenDir := os.Getenv("COLAB_TOKEN_DIR")
 	if colabTokenDir == "" {
 		colabTokenDir = os.Getenv("HOME") + "/.config/colab-cli"
@@ -332,10 +368,15 @@ func main() {
 	handler.TikTokAsyncSlots = tiktokConcurrency
 	runner := &jobs.Runner{Jobs: jobStore, Dispatcher: dispatcher, Workers: workers, Files: mediaStore, TikTokConcurrency: tiktokConcurrency, Settings: runtimeSettings}
 	runner.Start(reclaimCtx)
-	supervisor := &jobs.Supervisor{Jobs: jobStore, Files: mediaStore, Sessions: sessions}
+	supervisor := &jobs.Supervisor{Jobs: jobStore, Files: mediaStore, Sessions: sessions, VideoTimeout: runner.VideoTimeout}
 	supervisor.Start(reclaimCtx)
 	router := gateway.NewRouterWithLimits(handler, cfg.Server.APIKey, cfg.Server.MaxRequestBodyBytes)
-	server := &http.Server{Addr: fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port), Handler: router, ReadHeaderTimeout: 10 * time.Second, WriteTimeout: 5 * time.Minute}
+	// WriteTimeout intentionally stays disabled (zero): it is an absolute
+	// connection deadline, not per-request, and Gemini streams can run 900s
+	// while large downloads take even longer. Upstream stream clients keep
+	// their own deadlines.
+	server := &http.Server{Addr: fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port), Handler: router, ReadHeaderTimeout: 10 * time.Second}
+	server.RegisterOnShutdown(func() { _ = workers.Close() })
 	serverErr := make(chan error, 1)
 	go func() {
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -347,12 +388,36 @@ func main() {
 	select {
 	case err := <-serverErr:
 		fmt.Fprintf(os.Stderr, "server listen failed: %v\n", err)
-		return
 	case <-stop:
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.Server.ShutdownGraceSec)*time.Second)
 	defer cancel()
-	_ = server.Shutdown(ctx)
+	// M11: stop the job claim loop before draining HTTP. In-flight jobs observe
+	// the canceled parent and return to PENDING instead of FAILED.
+	stopReclaim()
+	if err := runner.Wait(ctx); err != nil {
+		log.Printf("[shutdown] runner did not drain within grace period: %v", err)
+	}
+	// WebSockets are hijacked connections that http.Server.Shutdown does not
+	// wait for. Close the hub explicitly after jobs have been requeued; the
+	// registered callback keeps the same guarantee if Shutdown runs first.
+	if err := workers.Close(); err != nil {
+		log.Printf("[shutdown] close worker hub: %v", err)
+	}
+	if err := server.Shutdown(ctx); err != nil {
+		log.Printf("[shutdown] server shutdown: %v", err)
+	}
+}
+
+// countAPIKeys returns the number of rows in api_keys. A query failure is
+// reported to the caller so startup can fail closed instead of serving an
+// unauthenticated deployment.
+func countAPIKeys(ctx context.Context, db *sql.DB) (int, error) {
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM api_keys`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count api_keys: %w", err)
+	}
+	return count, nil
 }
 
 // warnUndecryptableGoogleSecrets logs credential IDs whose stored secrets can't

@@ -29,8 +29,9 @@ func TestDeepSeekAccountsHandler(t *testing.T) {
 	}
 
 	mgr := identity.NewManager(database.DB, store)
+	t.Setenv("ADMIN_PASSWORD", "test-admin-pass")
 	auth := admin.NewFromEnv()
-	token, err := auth.Login(admin.DefaultPassword)
+	token, err := auth.Login("test-admin-pass")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,8 +144,9 @@ func TestDeepSeekAutoLoginEndpoints(t *testing.T) {
 	}
 
 	mgr := identity.NewManager(database.DB, store)
+	t.Setenv("ADMIN_PASSWORD", "test-admin-pass")
 	auth := admin.NewFromEnv()
-	token, err := auth.Login(admin.DefaultPassword)
+	token, err := auth.Login("test-admin-pass")
 	if err != nil {
 		t.Fatal(err)
 	}

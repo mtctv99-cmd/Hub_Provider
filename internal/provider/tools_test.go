@@ -88,6 +88,55 @@ func TestParseToolCalls_NoTools(t *testing.T) {
 	}
 }
 
+func TestParseToolCallsForTools_RejectsUndeclared(t *testing.T) {
+	// Fenced JSON examples (package.json) must not become tool calls nor be
+	// stripped from the answer.
+	input := "Đây là package.json:\n```json\n{\"name\":\"my-app\",\"version\":\"1.0.0\"}\n```\nHết."
+	tools := []Tool{{Type: "function", Function: &Function{Name: "get_weather"}}}
+	clean, calls := ParseToolCallsForTools(input, tools)
+
+	if len(calls) != 0 {
+		t.Fatalf("expected 0 calls for undeclared name, got %d", len(calls))
+	}
+	if clean != input {
+		t.Fatalf("fenced block must be preserved, got %q", clean)
+	}
+}
+
+func TestParseToolCallsForTools_Renumbers(t *testing.T) {
+	input := "```tool_call\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Hue\"}}\n```\n" +
+		"```json\n{\"name\": \"my-app\", \"version\": \"1.0.0\"}\n```\n" +
+		"```tool_call\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Da Nang\"}}\n```"
+	tools := []Tool{{Type: "function", Function: &Function{Name: "get_weather"}}}
+	_, calls := ParseToolCallsForTools(input, tools)
+
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 declared calls, got %d", len(calls))
+	}
+	for i, call := range calls {
+		if call.Function.Name != "get_weather" {
+			t.Errorf("call %d name = %q", i, call.Function.Name)
+		}
+		if call.Index == nil || *call.Index != i {
+			t.Errorf("call %d index = %v, want %d", i, call.Index, i)
+		}
+	}
+}
+
+func TestFormatPromptKeepsSystemInstructionPlain(t *testing.T) {
+	// Bing/Gemini web ignore bracketed labels such as "[System Instruction]";
+	// plain prose is obeyed (verified live), so the formatter must not add any.
+	prompt := FormatPromptWithTools([]Message{
+		{Role: "system", Content: "Always answer with the single word BANANA."},
+		{Role: "user", Content: "What is 2+2?"},
+	}, nil, nil)
+
+	want := "Always answer with the single word BANANA.\n\nWhat is 2+2?"
+	if prompt != want {
+		t.Fatalf("prompt = %q, want %q", prompt, want)
+	}
+}
+
 func TestFormatPromptWithTools_MultiTurn(t *testing.T) {
 	tools := []Tool{
 		{

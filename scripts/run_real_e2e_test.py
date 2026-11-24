@@ -30,7 +30,7 @@ env["COLAB_WORKER_KEY"] = worker_token
 env["WORKER_AUTH_TOKEN"] = worker_token
 env["PIPER_MODELS_DIR"] = "models"
 env["PIPER_BIN"] = r"C:\Users\MaiThanhChu\AppData\Local\hermes\hermes-agent\venv\Scripts\piper.EXE"
-env["MASTER_KEY"] = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+env["MASTER_KEY"] = ( __import__("os").environ.get("MASTER_KEY") or __import__("sys").exit("set MASTER_KEY in the environment") )
 
 exe_path = str((Path(__file__).resolve().parent.parent / "sever-provider-new.exe"))
 log(f"1. Khởi động {exe_path} trên cổng {server_port}...")

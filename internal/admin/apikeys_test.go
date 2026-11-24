@@ -43,6 +43,8 @@ func setupTestDB(t *testing.T) *sql.DB {
 		model TEXT,
 		account_id TEXT,
 		latency_ms REAL,
+		ttft_ms REAL,
+		outcome TEXT,
 		error_kind TEXT,
 		detail TEXT,
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP

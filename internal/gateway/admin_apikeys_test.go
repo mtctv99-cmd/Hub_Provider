@@ -86,6 +86,8 @@ func setupTestDBForGateway(t *testing.T) *sql.DB {
 			model TEXT,
 			account_id TEXT,
 			latency_ms REAL,
+			ttft_ms REAL,
+			outcome TEXT,
 			error_kind TEXT,
 			detail TEXT,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -220,13 +222,14 @@ func TestAPIKeyMiddlewareAndEndpoints(t *testing.T) {
 		t.Fatalf("expected 200 OK from revoke, got %d", resp.StatusCode)
 	}
 
-	// 8. Model discovery ignores a supplied key after it has been revoked.
+	// 8. A revoked key supplied to model discovery is rejected.
 	req, _ = http.NewRequest(http.MethodGet, ts.URL+"/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer "+created.Key)
 	resp, err = http.DefaultClient.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected public model catalog with revoked API key, got %v (%d)", err, resp.StatusCode)
+	if err != nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for revoked key on /v1/models, got %v (%d)", err, resp.StatusCode)
 	}
+	_ = resp.Body.Close()
 
 	// 9. Delete the API key
 	resp = doAdminReq(http.MethodDelete, "/admin/api/apikeys/delete/"+created.Metadata.ID, nil)

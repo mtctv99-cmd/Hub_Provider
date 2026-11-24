@@ -82,6 +82,37 @@ func ParseToolCalls(text string) (string, []ToolCall) {
 	return strings.TrimSpace(cleaned), calls
 }
 
+// ParseToolCallsForTools keeps only calls whose function was declared in the
+// request. Fenced JSON examples (package.json, configs) are not tool calls and
+// must not strip content; undeclared hallucinated names are dropped too.
+// When nothing is declared-matching the original text (with fences) is returned.
+func ParseToolCallsForTools(text string, tools []Tool) (string, []ToolCall) {
+	clean, calls := ParseToolCalls(text)
+	if len(calls) == 0 {
+		return clean, nil
+	}
+	declared := make(map[string]bool, len(tools))
+	for _, t := range tools {
+		if t.Type == "function" && t.Function != nil {
+			declared[t.Function.Name] = true
+		}
+	}
+	kept := calls[:0]
+	for _, c := range calls {
+		if declared[c.Function.Name] {
+			kept = append(kept, c)
+		}
+	}
+	if len(kept) == 0 {
+		return strings.TrimSpace(text), nil
+	}
+	for i := range kept {
+		idx := i
+		kept[i].Index = &idx
+	}
+	return clean, kept
+}
+
 func extractNameAndArgs(c rawToolCall) (string, string) {
 	name := c.Name
 	rawArgs := c.Arguments
@@ -172,7 +203,7 @@ func FormatPromptWithTools(messages []Message, tools []Tool, toolChoice any) str
 
 		switch role {
 		case "system":
-			parts = append(parts, fmt.Sprintf("[System Instruction]: %s", content))
+			parts = append(parts, content)
 		case "assistant":
 			line := "[Assistant]: " + strings.TrimSpace(content)
 			if toolCallBlocks != "" {
@@ -190,7 +221,11 @@ func FormatPromptWithTools(messages []Message, tools []Tool, toolChoice any) str
 			}
 			parts = append(parts, fmt.Sprintf("[Tool Result (%s)]: %s", toolName, content))
 		default: // "user"
-			parts = append(parts, fmt.Sprintf("[User]: %s", content))
+			// No "[User]:" label: Gemini follows instructions far more reliably
+			// when the turn is plain prose (verified live). A text label is not a
+			// security boundary anyway on a single-string web prompt: gateway
+			// instructions are enforced by validation and retry, not by markers.
+			parts = append(parts, content)
 		}
 	}
 

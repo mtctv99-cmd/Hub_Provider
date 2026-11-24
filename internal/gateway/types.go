@@ -14,10 +14,40 @@ type ChatCompletionRequest struct {
 	Tools           []provider.Tool    `json:"tools,omitempty"`
 	ToolChoice      any                `json:"tool_choice,omitempty"`
 	Stream          bool               `json:"stream,omitempty"`
+	StreamOptions   *StreamOptions     `json:"stream_options,omitempty"`
 	Temperature     *float32           `json:"temperature,omitempty"`
 	MaxTokens       int                `json:"max_tokens,omitempty"`
+	Stop            []string           `json:"stop,omitempty"`
+	N               int                `json:"n,omitempty"`
 	Modalities      []string           `json:"modalities,omitempty"`
 	ImageGeneration bool               `json:"image_generation,omitempty"`
+	ResponseFormat  *ResponseFormat    `json:"response_format,omitempty"`
+	// Logprobs/TopLogprobs/ParallelToolCalls are declared only so the gateway can
+	// reject the values it cannot honour. false/0 mean "not requested", so only
+	// the pointer on ParallelToolCalls is needed to catch an explicit false.
+	Logprobs          bool  `json:"logprobs,omitempty"`
+	TopLogprobs       int   `json:"top_logprobs,omitempty"`
+	ParallelToolCalls *bool `json:"parallel_tool_calls,omitempty"`
+}
+
+// ResponseFormat mirrors OpenAI's response_format. Web upstreams have no native
+// structured output, so the gateway injects a prompt instruction and validates
+// the reply itself (see docs/response-format.md for the limits).
+type ResponseFormat struct {
+	Type       string          `json:"type"`
+	JSONSchema *JSONSchemaSpec `json:"json_schema,omitempty"`
+}
+
+type JSONSchemaSpec struct {
+	Name   string          `json:"name,omitempty"`
+	Schema json.RawMessage `json:"schema"`
+	// Strict is accepted for OpenAI compatibility and has no effect: the web
+	// upstreams cannot enforce schemas natively.
+	Strict bool `json:"strict,omitempty"`
+}
+
+type StreamOptions struct {
+	IncludeUsage bool `json:"include_usage,omitempty"`
 }
 
 type ChatCompletionResponse struct {
@@ -56,11 +86,15 @@ type VideoGenerationRequest struct {
 }
 
 type AnthropicMessageRequest struct {
-	Model           string             `json:"model"`
-	ReasoningEffort string             `json:"reasoning_effort,omitempty"`
-	Messages        []provider.Message `json:"messages"`
-	MaxTokens       int                `json:"max_tokens,omitempty"`
-	Stream          bool               `json:"stream,omitempty"`
+	Model           string               `json:"model"`
+	ReasoningEffort string               `json:"reasoning_effort,omitempty"`
+	System          any                  `json:"system,omitempty"`
+	Messages        anthropicMessages    `json:"messages"`
+	Tools           []AnthropicTool      `json:"tools,omitempty"`
+	ToolChoice      *AnthropicToolChoice `json:"tool_choice,omitempty"`
+	MaxTokens       int                  `json:"max_tokens,omitempty"`
+	StopSequences   []string             `json:"stop_sequences,omitempty"`
+	Stream          bool                 `json:"stream,omitempty"`
 }
 
 type TTSGenerateRequest struct {
@@ -95,6 +129,9 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 func writeError(w http.ResponseWriter, status int, message, typ, code string) {
+	if status == http.StatusTooManyRequests {
+		w.Header().Set("Retry-After", "60")
+	}
 	writeJSON(w, status, ErrorEnvelope{Error: APIError{Message: message, Type: typ, Code: code}})
 }
 func methodNotAllowed(w http.ResponseWriter) {

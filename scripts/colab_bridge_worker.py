@@ -19,7 +19,7 @@ LOG = logging.getLogger('colab_bridge_worker')
 
 COLAB_UPSTREAM_URL = 'http://192.168.1.117:8095/v1/chat/completions'
 COLAB_UPSTREAM_MODEL = 'gemma-4-E2B-it-ultra-uncensored-heretic-Q4_K_M'
-COLAB_UPSTREAM_KEY = 'omni-secret-key-123'
+COLAB_UPSTREAM_KEY = ( __import__("os").environ.get("API_KEY") or __import__("sys").exit("set API_KEY in the environment") )
 
 
 def format_colab_messages(messages):
@@ -181,7 +181,7 @@ def run_bridge_worker(server_url, token, worker_id, stop):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--server', default='ws://127.0.0.1:18080/api/llm/ws/worker')
-    parser.add_argument('--token', default=os.environ.get('WORKER_TOKEN') or os.environ.get('COLAB_WORKER_KEY') or 'omni-secret-key-123')
+    parser.add_argument('--token', default=( __import__("os").environ.get("WORKER_AUTH_TOKEN") or __import__("sys").exit("set WORKER_AUTH_TOKEN in the environment") ))
     parser.add_argument('--worker-id', default='colab-t4-live-bridge')
     args = parser.parse_args()
 

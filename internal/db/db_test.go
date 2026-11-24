@@ -32,15 +32,15 @@ func TestOpenMigratesSchemaAndEnablesWAL(t *testing.T) {
 	}
 }
 
-func TestDBUsesSingleConnection(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "single.db")
+func TestDBUsesBoundedReadPool(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pool.db")
 	db, err := Open(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if db.Stats().MaxOpenConnections != 1 {
-		t.Fatalf("expected one max connection")
+	if db.Stats().MaxOpenConnections != 4 {
+		t.Fatalf("expected four max connections, got %d", db.Stats().MaxOpenConnections)
 	}
 	_ = sql.ErrNoRows
 }

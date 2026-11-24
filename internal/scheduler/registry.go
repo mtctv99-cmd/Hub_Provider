@@ -47,19 +47,12 @@ func DefaultDeepSeekReasonerModelSpec() ModelSpec {
 
 func NewModelRegistry() *ModelRegistry {
 	r := &ModelRegistry{models: make(map[string]ModelSpec)}
-	_ = r.Register(DefaultDeepSeekChatModelSpec())
-	_ = r.Register(DefaultDeepSeekReasonerModelSpec())
-	_ = r.Register(ModelSpec{ID: "deepseek-flash", Provider: "deepseek_web", Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming}, TimeoutSec: 120})
-	_ = r.Register(ModelSpec{ID: "deepseek-v4.1-flash", Provider: "deepseek_web", Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming}, TimeoutSec: 120})
-	_ = r.Register(ModelSpec{ID: "deepseek-v4-flash", Provider: "deepseek_web", Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming}, TimeoutSec: 120})
-	_ = r.Register(ModelSpec{ID: "deepseek-v4-pro", Provider: "deepseek_web", Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming, provider.CapabilityReasoning}, TimeoutSec: 180})
 	_ = r.Register(ModelSpec{ID: "gpt-5.6", Provider: "copilot_ws", Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming, provider.CapabilityVision}, TimeoutSec: 90})
 	_ = r.Register(ModelSpec{ID: "gpt-5.6-reasoner", Provider: "copilot_ws", Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming, provider.CapabilityReasoning, provider.CapabilityVision}, TimeoutSec: 180})
 	_ = r.Register(ModelSpec{ID: "copilot-chat", Provider: "copilot_ws", Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming, provider.CapabilityVision}, TimeoutSec: 90})
 	_ = r.Register(ModelSpec{ID: "copilot-creative", Provider: "copilot_ws", Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming, provider.CapabilityVision}, TimeoutSec: 90})
 	_ = r.Register(ModelSpec{ID: "copilot-precise", Provider: "copilot_ws", Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming, provider.CapabilityVision}, TimeoutSec: 90})
 	_ = r.Register(ModelSpec{ID: "copilot-balanced", Provider: "copilot_ws", Capabilities: []provider.Capability{provider.CapabilityChat, provider.CapabilityStreaming, provider.CapabilityVision}, TimeoutSec: 90})
-	_ = r.Register(ModelSpec{ID: "dall-e-3", Provider: "copilot_ws", Capabilities: []provider.Capability{provider.CapabilityImage}, TimeoutSec: 120})
 	return r
 }
 func (r *ModelRegistry) Register(spec ModelSpec) error {
@@ -87,6 +80,7 @@ func (r *ModelRegistry) RegisterWithReasoningEffortAliases(spec ModelSpec) error
 		alias.BaseModel = spec.ID
 		alias.ReasoningEffort = effort
 		alias.Capabilities = append([]provider.Capability(nil), spec.Capabilities...)
+		alias.FailoverTo = append([]string(nil), spec.FailoverTo...)
 		if err := r.Register(alias); err != nil {
 			return err
 		}

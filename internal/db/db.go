@@ -34,9 +34,11 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	// One writer keeps transaction ownership explicit; SQLite still allows readers.
-	h.SetMaxOpenConns(1)
-	h.SetMaxIdleConns(1)
+	// WAL allows concurrent readers; _txlock=immediate still serializes writers.
+	// A small pool removes the single-connection head-of-line stall on read-heavy
+	// auth/model/session lookups without changing transaction semantics.
+	h.SetMaxOpenConns(4)
+	h.SetMaxIdleConns(4)
 
 	db := &DB{DB: h}
 	if err := db.PingContext(ctx); err != nil {
@@ -70,6 +72,8 @@ func (d *DB) Migrate(ctx context.Context) error {
 		`ALTER TABLE api_keys ADD COLUMN scopes TEXT NOT NULL DEFAULT 'all'`,
 		`ALTER TABLE api_keys ADD COLUMN expires_at DATETIME`,
 		`ALTER TABLE api_keys ADD COLUMN rate_limit_rpm INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE observability_events ADD COLUMN ttft_ms REAL`,
+		`ALTER TABLE observability_events ADD COLUMN outcome TEXT`,
 	} {
 		if _, err := d.ExecContext(ctx, stmt); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return fmt.Errorf("apply additive migration %q: %w", stmt, err)

@@ -18,10 +18,14 @@ type webModelConfig struct {
 }
 
 var webModels = map[string]webModelConfig{
+	// Hex ids are the ones the signed-in Gemini web picker reports
+	// (data-mode-id), verified 2026-11-13.
+	"gemini-4-hydrogen":     {hex: "56fdd199312815e2", mode: 1, image: true},
 	"gemini-3.8-flash":      {hex: "56fdd199312815e2", mode: 1, image: true},
 	"gemini-3.6-flash":      {hex: "56fdd199312815e2", mode: 1, image: true},
-	"gemini-3.5-flash-lite": {hex: "cf41b0e0dd7d53e5", mode: 6},
-	"gemini-3.1-pro":        {hex: "9d8ca3786ebdfbea", mode: 3},
+	"gemini-3.5-flash-lite": {hex: "8c46e95b1a07cecc", mode: 6},
+	"gemini-3.1-pro":        {hex: "e6fa609c3fa255c0", mode: 3},
+	"gemini-4-carbon":       {hex: "797f3d0293f288ad", mode: 3},
 	"gemini-4-argon":        {hex: "95a4c0abcba24364", mode: 8},
 }
 

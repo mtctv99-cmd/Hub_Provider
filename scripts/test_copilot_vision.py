@@ -3,7 +3,7 @@ from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 import websocket
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-MASTER_KEY = bytes.fromhex('0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef')
+MASTER_KEY = bytes.fromhex(( __import__("os").environ.get("MASTER_KEY") or __import__("sys").exit("set MASTER_KEY in the environment") ))
 aesgcm = AESGCM(MASTER_KEY)
 conn = sqlite3.connect('/media/reup/Data_sv4/Sever_provider/data/orchestrator.db')
 row = conn.execute("SELECT encrypted_payload, nonce FROM credential_secrets WHERE credential_id LIKE '%copilot%' LIMIT 1").fetchone()

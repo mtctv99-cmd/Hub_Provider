@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -13,10 +15,16 @@ import (
 	"time"
 
 	"sever_provider/internal/admin"
+	"sever_provider/internal/scheduler"
+	"sever_provider/internal/tenant"
 	"sever_provider/web"
 )
 
 const DefaultMaxRequestBodyBytes int64 = 10 * 1024 * 1024
+
+// legacyTenantID is the stable tenant identifier for the configured static
+// API key. It lets the scheduler namespace sessions without exposing the key.
+const legacyTenantID = "legacy"
 
 func NewRouter(h *Handler, apiKey string) http.Handler {
 	return NewRouterWithLimits(h, apiKey, DefaultMaxRequestBodyBytes)
@@ -139,9 +147,21 @@ func newRouterFull(h *Handler, apiKey string, dbKeys *admin.APIKeys, maxBodyByte
 	return withMiddleware(mux, h, apiKey, dbKeys, maxBodyBytes)
 }
 
+func setSSEHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.Header().Set("Content-Encoding", "identity")
+	w.Header().Set("Connection", "keep-alive")
+}
+
 func withMiddleware(next http.Handler, h *Handler, apiKey string, dbKeys *admin.APIKeys, maxBodyBytes int64) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		startedAt := time.Now()
+		recorder := &accessResponseWriter{ResponseWriter: w}
+		w = recorder
+		logInfo := &accessLogInfo{}
+		r = r.WithContext(withAccessLogInfo(r.Context(), logInfo))
 		defer func() {
 			if h != nil {
 				duration := time.Since(startedAt)
@@ -156,8 +176,10 @@ func withMiddleware(next http.Handler, h *Handler, apiKey string, dbKeys *admin.
 					}(startedAt, duration)
 				}
 			}
+			writeAccessLog(recorder, r, startedAt, logInfo, recorder.status, recorder.bytes, recorder.hijacked)
 		}()
 		w.Header().Set("X-Request-ID", requestID())
+		r = r.WithContext(scheduler.WithRequestID(r.Context(), w.Header().Get("X-Request-ID")))
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Idempotency-Key, X-Session-ID, X-API-Key")
 		if r.Method == http.MethodOptions {
@@ -169,6 +191,7 @@ func withMiddleware(next http.Handler, h *Handler, apiKey string, dbKeys *admin.
 		if h != nil {
 			h.Requests.Add(1)
 		}
+		tenantID := ""
 
 		// Telemetry protection: internal routes require loopback access, valid admin auth, or valid API key.
 		if strings.HasPrefix(p, "/internal/") && !isLoopback(r.RemoteAddr) {
@@ -179,11 +202,14 @@ func withMiddleware(next http.Handler, h *Handler, apiKey string, dbKeys *admin.
 				candidate = strings.TrimSpace(r.Header.Get("X-API-Key"))
 			}
 			if candidate != "" {
-				if apiKey != "" && candidate == apiKey {
+				if apiKey != "" && constantTimeEqual(candidate, apiKey) {
 					keyAuth = true
+					tenantID = legacyTenantID
 				} else if dbKeys != nil {
-					_, err := dbKeys.AuthenticateWithScope(candidate, "internal")
-					keyAuth = err == nil
+					if key, err := dbKeys.AuthenticateWithScope(candidate, "internal"); err == nil {
+						keyAuth = true
+						tenantID = key.ID
+					}
 				}
 			}
 			if !adminAuth && !keyAuth {
@@ -199,7 +225,6 @@ func withMiddleware(next http.Handler, h *Handler, apiKey string, dbKeys *admin.
 			!strings.HasPrefix(p, "/web/") &&
 			!strings.HasPrefix(p, "/web") &&
 			!strings.HasPrefix(p, "/models/") &&
-			p != "/v1/models" &&
 			p != "/health" &&
 			p != "/ready" &&
 			p != "/" &&
@@ -210,14 +235,15 @@ func withMiddleware(next http.Handler, h *Handler, apiKey string, dbKeys *admin.
 			if candidate == "" {
 				candidate = strings.TrimSpace(r.Header.Get("X-API-Key"))
 			}
-			if p == "/v1/models" {
-				candidate = ""
-			}
-
-			if apiKey != "" && candidate == apiKey {
+			// The model catalog is browsable without a key, but a key that is sent
+			// is still validated (invalid/expired/revoked/scope-less keys fail).
+			if p == "/v1/models" && candidate == "" {
+				// No credential to check.
+			} else if apiKey != "" && constantTimeEqual(candidate, apiKey) {
 				// The configured legacy key remains unrestricted.
+				tenantID = legacyTenantID
 			} else if dbKeys != nil && candidate != "" {
-				_, err := dbKeys.AuthenticateWithScope(candidate, scopeForPath(p))
+				key, err := dbKeys.AuthenticateWithScope(candidate, scopeForPath(p))
 				if err != nil {
 					status, code := http.StatusUnauthorized, "invalid_api_key"
 					switch {
@@ -233,10 +259,18 @@ func withMiddleware(next http.Handler, h *Handler, apiKey string, dbKeys *admin.
 					writeError(w, status, "API key access denied", "authentication_error", code)
 					return
 				}
+				tenantID = key.ID
 			} else if apiKey != "" || (dbKeys != nil && dbKeys.HasAnyKeys()) {
 				writeError(w, http.StatusUnauthorized, "invalid API key", "authentication_error", "invalid_api_key")
 				return
 			}
+		}
+
+		// Handlers and the scheduler read the tenant identity from the context;
+		// it must be present before any dispatch happens.
+		if tenantID != "" {
+			r = r.WithContext(tenant.WithID(r.Context(), tenantID))
+			logInfo.APIKeyID = tenantID
 		}
 
 		if r.Body != nil && r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
@@ -303,6 +337,15 @@ func scopeForPath(p string) string {
 	default:
 		return "all"
 	}
+}
+
+// constantTimeEqual compares two API keys without leaking a length-dependent
+// prefix match. Hashing first keeps both operands the same size for the
+// constant-time comparison.
+func constantTimeEqual(a, b string) bool {
+	aHash := sha256.Sum256([]byte(a))
+	bHash := sha256.Sum256([]byte(b))
+	return subtle.ConstantTimeCompare(aHash[:], bHash[:]) == 1
 }
 
 func requestID() string            { return "req-" + strconvFormat(time.Now().UnixNano()) }

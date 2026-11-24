@@ -6,7 +6,7 @@ import time
 import requests
 
 SERVER_URL = "http://192.168.1.117:18080/v1/audio/speech/batch"
-AUTH_KEY = "sk-sp-unlimited-master-key"
+AUTH_KEY = ( __import__("os").environ.get("API_KEY") or __import__("sys").exit("set API_KEY in the environment") )
 SSH_HOST = "reup@192.168.1.117"
 
 ITEMS = [

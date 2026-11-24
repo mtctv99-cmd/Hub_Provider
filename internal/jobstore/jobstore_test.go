@@ -137,6 +137,81 @@ func TestResetStaleAndCleanupOld(t *testing.T) {
 	}
 }
 
+func TestRequeue(t *testing.T) {
+	store, ctx := openTestStore(t)
+	job := Job{ID: "requeue-me", Type: "video"}
+	if err := store.Create(ctx, &job); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.ClaimNext(ctx, "runner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed.Status != PROCESSING || claimed.Attempts != 1 {
+		t.Fatalf("unexpected claim: %#v", claimed)
+	}
+	if err := store.Requeue(ctx, claimed.ID); err != nil {
+		t.Fatal(err)
+	}
+	requeued, err := store.Get(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requeued.Status != PENDING || requeued.LockedAt != nil || requeued.LockedBy != "" || requeued.Attempts != 1 {
+		t.Fatalf("unexpected requeued job: %#v", requeued)
+	}
+	// A completed job must not be pulled back into the queue.
+	if _, err := store.ClaimNext(ctx, "runner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Complete(ctx, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Requeue(ctx, job.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Requeue completed job error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestResetStaleByType(t *testing.T) {
+	store, ctx := openTestStore(t)
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	video := Job{ID: "video", Type: "video"}
+	chat := Job{ID: "chat", Type: "llm"}
+	for _, job := range []*Job{&video, &chat} {
+		if err := store.Create(ctx, job); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.ClaimNext(ctx, "worker"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store.now = func() time.Time { return now.Add(11 * time.Minute) }
+
+	reset, err := store.ResetStaleExceptType(ctx, 10*time.Minute, "video")
+	if err != nil || reset != 1 {
+		t.Fatalf("ResetStaleExceptType = %d, err = %v", reset, err)
+	}
+	videoJob, _ := store.Get(ctx, video.ID)
+	chatJob, _ := store.Get(ctx, chat.ID)
+	if videoJob.Status != PROCESSING {
+		t.Fatalf("video job must stay processing at 11m, got %s", videoJob.Status)
+	}
+	if chatJob.Status != PENDING {
+		t.Fatalf("chat job must be reset at 11m, got %s", chatJob.Status)
+	}
+
+	store.now = func() time.Time { return now.Add(61 * time.Minute) }
+	reset, err = store.ResetStaleType(ctx, 60*time.Minute, "video")
+	if err != nil || reset != 1 {
+		t.Fatalf("ResetStaleType = %d, err = %v", reset, err)
+	}
+	videoJob, _ = store.Get(ctx, video.ID)
+	if videoJob.Status != PENDING {
+		t.Fatalf("video job must reset after 60m, got %s", videoJob.Status)
+	}
+}
+
 func TestValidation(t *testing.T) {
 	store, ctx := openTestStore(t)
 	if err := store.Create(ctx, nil); err == nil {

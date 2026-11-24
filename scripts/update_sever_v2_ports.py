@@ -4,6 +4,11 @@ import os
 import json
 import hashlib
 
+# Legacy token to replace, supplied via the environment when a migration needs
+# it. Never embed the shipped default here: this file is tracked in git.
+_OLD_WORKER_TOKEN = os.environ.get("OLD_WORKER_TOKEN", "")
+_REQUIRED_API_KEY = os.environ.get("API_KEY") or exit("set API_KEY in the environment")
+
 print("--- 1. Updating sever.db ---")
 db_path = "/media/reup/Data_sv4/SVRV/sever_v2/sever/data/sever.db"
 if os.path.exists(db_path):
@@ -15,9 +20,9 @@ if os.path.exists(db_path):
     for row in cur.fetchall():
         pid, name, url, key = row
         new_url = url.replace(":8090", ":18080").replace(":8081", ":18080")
-        new_key = "sk-sp-unlimited-master-key" if not key or key == "omni-secret-key-123" else key
+        new_key = _REQUIRED_API_KEY if not key or (_OLD_WORKER_TOKEN and key == _OLD_WORKER_TOKEN) else key
         cur.execute("UPDATE providers SET base_url=?, api_key=? WHERE id=?", (new_url, new_key, pid))
-        print(f" -> Provider '{name}': {url} => {new_url} (Key: {new_key[:12]}...)")
+        print(f" -> Provider '{name}': {url} => {new_url} (key {'updated' if new_key != key else 'unchanged'})")
 
     cur.execute("SELECT key, value FROM settings WHERE key='shared_tier_configs';")
     row = cur.fetchone()
@@ -36,7 +41,8 @@ if os.path.exists(static_py):
     with open(static_py, "r") as f:
         code = f.read()
     code = code.replace('_OMNI_TTS_DEFAULT_BASE_URL = "http://localhost:8090"', '_OMNI_TTS_DEFAULT_BASE_URL = "http://localhost:18080"')
-    code = code.replace('_OMNI_TTS_DEFAULT_API_KEY = "omni-secret-key-123"', '_OMNI_TTS_DEFAULT_API_KEY = "sk-sp-unlimited-master-key"')
+    if _OLD_WORKER_TOKEN:
+        code = code.replace(f'_OMNI_TTS_DEFAULT_API_KEY = "{_OLD_WORKER_TOKEN}"', f'_OMNI_TTS_DEFAULT_API_KEY = "{_REQUIRED_API_KEY}"')
     with open(static_py, "w") as f:
         f.write(code)
     print(" -> static.py updated (_OMNI_TTS_DEFAULT_BASE_URL = 'http://localhost:18080')")

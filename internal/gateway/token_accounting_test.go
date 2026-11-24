@@ -45,6 +45,33 @@ func (mockZeroUsageAdapter) Video(context.Context, provider.VideoRequest, []byte
 	return provider.VideoResponse{}, provider.ErrCapabilityUnsupported
 }
 
+func decodeSSEChunks(t *testing.T, body string) []ChatCompletionResponse {
+	t.Helper()
+	var out []ChatCompletionResponse
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "data:"))
+		if line == "" || line == "[DONE]" {
+			continue
+		}
+		var chunk ChatCompletionResponse
+		if err := json.Unmarshal([]byte(line), &chunk); err == nil {
+			out = append(out, chunk)
+		}
+	}
+	return out
+}
+
+func streamChunkUsage(t *testing.T, body string) int {
+	t.Helper()
+	total := 0
+	for _, chunk := range decodeSSEChunks(t, body) {
+		if chunk.Usage.TotalTokens > 0 {
+			total = chunk.Usage.TotalTokens
+		}
+	}
+	return total
+}
+
 func TestGlobalAITokensCalculation(t *testing.T) {
 	models := scheduler.NewModelRegistry()
 	_ = models.Register(scheduler.ModelSpec{
@@ -104,6 +131,31 @@ func TestGlobalAITokensCalculation(t *testing.T) {
 	tokAfter2 := h.AITokens.Load()
 	if tokAfter2 <= tokAfter1 {
 		t.Fatalf("streaming chat did not increase h.AITokens: before=%d, after=%d", tokAfter1, tokAfter2)
+	}
+
+	// Web providers report no upstream usage, so the streamed final chunk must
+	// carry the gateway's estimate instead of zeros.
+	if got := streamChunkUsage(t, buf.String()); got == 0 {
+		t.Fatalf("streamed final chunk carried no usage: %s", buf.String())
+	}
+
+	// stream_options.include_usage must add a choices-less usage chunk.
+	incReq := `{"model":"test-gemini-web","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"Stream to me"}]}`
+	incResp, err := http.Post(server.URL+"/v1/chat/completions", "application/json", strings.NewReader(incReq))
+	if err != nil || incResp.StatusCode != 200 {
+		t.Fatalf("include_usage stream failed: %v, status: %d", err, incResp.StatusCode)
+	}
+	buf.Reset()
+	_, _ = buf.ReadFrom(incResp.Body)
+	_ = incResp.Body.Close()
+	foundUsageChunk := false
+	for _, chunk := range decodeSSEChunks(t, buf.String()) {
+		if len(chunk.Choices) == 0 && chunk.Usage.TotalTokens > 0 {
+			foundUsageChunk = true
+		}
+	}
+	if !foundUsageChunk {
+		t.Fatalf("include_usage did not emit a usage chunk: %s", buf.String())
 	}
 
 	// 3. Anthropic format non-streaming message

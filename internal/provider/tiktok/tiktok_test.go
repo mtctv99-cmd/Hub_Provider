@@ -3,6 +3,7 @@ package tiktok
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -99,5 +100,55 @@ func TestSplitTextUTF8(t *testing.T) {
 		if len([]byte(part)) > 10 {
 			t.Fatalf("chunk exceeds byte limit: %q", part)
 		}
+	}
+}
+
+func TestCredentialSessionStillHonoursPoolCooldown(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Write([]byte(`{"message":"success","data":{"v_str":"bXAz"}}`))
+	}))
+	defer server.Close()
+
+	pool := NewPool([]string{"cred-session"})
+	pool.RateLimited("cred-session")
+	adapter := New(&http.Client{Timeout: time.Second}, pool)
+	adapter.Endpoints = []string{server.URL}
+
+	credential, _ := json.Marshal(map[string]string{"session_id": "cred-session"})
+	_, _, err := adapter.Speech(context.Background(), provider.SpeechRequest{Input: "hello", Voice: "BV075_streaming"}, credential)
+	if err == nil {
+		t.Fatal("speech must fail while the credential session is cooling down")
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("cooling session must not reach the upstream, calls=%d", calls.Load())
+	}
+}
+
+func TestCredentialSessionIsAcquiredThroughPool(t *testing.T) {
+	var gotCookie string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotCookie = r.Header.Get("Cookie")
+		w.Write([]byte(`{"message":"success","data":{"v_str":"bXAz"}}`))
+	}))
+	defer server.Close()
+
+	adapter := New(&http.Client{Timeout: time.Second}, NewPool(nil))
+	adapter.Endpoints = []string{server.URL}
+	credential, _ := json.Marshal(map[string]string{"session_id": "cred-session"})
+
+	audio, _, err := adapter.Speech(context.Background(), provider.SpeechRequest{Input: "hello", Voice: "BV075_streaming"}, credential)
+	if err != nil {
+		t.Fatalf("speech failed: %v", err)
+	}
+	if string(audio) != "mp3" {
+		t.Fatalf("audio=%q", string(audio))
+	}
+	if gotCookie != "sessionid=cred-session" {
+		t.Fatalf("upstream cookie=%q, want the pooled credential session", gotCookie)
+	}
+	if adapter.Pool.Size() != 1 {
+		t.Fatalf("pool size=%d, want credential session registered", adapter.Pool.Size())
 	}
 }

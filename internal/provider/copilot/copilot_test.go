@@ -139,12 +139,12 @@ func TestCopilotImageSSRFControls(t *testing.T) {
 
 func TestPublicImageIP(t *testing.T) {
 	for _, raw := range []string{"127.0.0.1", "169.254.169.254", "10.0.0.1", "192.168.1.1", "100.64.0.1", "198.18.0.1", "203.0.113.1", "::1", "fc00::1", "2001:db8::1", "::ffff:127.0.0.1"} {
-		if publicImageIP(netip.MustParseAddr(raw)) {
+		if provider.PublicImageIP(netip.MustParseAddr(raw)) {
 			t.Fatalf("accepted nonpublic IP %s", raw)
 		}
 	}
 	for _, raw := range []string{"8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"} {
-		if !publicImageIP(netip.MustParseAddr(raw)) {
+		if !provider.PublicImageIP(netip.MustParseAddr(raw)) {
 			t.Fatalf("rejected public IP %s", raw)
 		}
 	}

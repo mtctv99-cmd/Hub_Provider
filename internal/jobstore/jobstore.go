@@ -45,6 +45,7 @@ type Job struct {
 	Kind        string
 	Model       string
 	Engine      string
+	OwnerKeyID  string
 	Payload     []byte
 	InputJSON   string
 	ResultJSON  string
@@ -81,6 +82,15 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, mustSchema()); err != nil {
 		return fmt.Errorf("jobstore: ensure schema: %w", err)
+	}
+	var hasOwner int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name='owner_key_id'`).Scan(&hasOwner); err != nil {
+		return fmt.Errorf("jobstore: inspect jobs schema: %w", err)
+	}
+	if hasOwner == 0 {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN owner_key_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("jobstore: add owner_key_id: %w", err)
+		}
 	}
 	return nil
 }
@@ -131,9 +141,9 @@ func (s *Store) Create(ctx context.Context, job *Job) error {
 
 	_, err := s.db.ExecContext(ctx, `
 			INSERT INTO jobs
-				(id, type, kind, model, engine, payload, input_json, result_json, output_path, output_mime, status, attempts, available_at, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		job.ID, job.Type, job.Kind, job.Model, job.Engine, job.Payload, job.InputJSON, job.ResultJSON,
+				(id, type, kind, model, engine, owner_key_id, payload, input_json, result_json, output_path, output_mime, status, attempts, available_at, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		job.ID, job.Type, job.Kind, job.Model, job.Engine, job.OwnerKeyID, job.Payload, job.InputJSON, job.ResultJSON,
 		job.OutputPath, job.OutputMIME, job.Status, job.Attempts, job.AvailableAt,
 		job.CreatedAt, job.UpdatedAt)
 	if err != nil {
@@ -234,9 +244,49 @@ func (s *Store) Fail(ctx context.Context, id string, failure any) error {
 	return transitionResult(result, id, "fail")
 }
 
+// Requeue returns a processing job to the pending queue without marking it
+// failed. Attempts are retained, matching ResetStale. It returns ErrNotFound
+// when the job is not currently processing (for example, it already finished).
+func (s *Store) Requeue(ctx context.Context, id string) error {
+	if err := s.prepare(ctx); err != nil {
+		return err
+	}
+	now := s.now().UTC()
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE jobs
+		SET status=?, available_at=?, locked_at=NULL, locked_by=NULL, error=NULL, updated_at=?
+		WHERE id=? AND status=?`, PENDING, now, now, id, PROCESSING)
+	if err != nil {
+		return fmt.Errorf("jobstore: requeue job: %w", err)
+	}
+	return transitionResult(result, id, "requeue")
+}
+
 // ResetStale returns processing jobs whose lock is at least maxAge old to the
 // pending queue. Attempts are retained. It returns the number of jobs reset.
 func (s *Store) ResetStale(ctx context.Context, maxAge time.Duration) (int, error) {
+	return s.resetStale(ctx, maxAge, "", "")
+}
+
+// ResetStaleType is ResetStale limited to one job type. It lets callers keep a
+// short stale window for chat/TTS jobs while giving long-running video jobs
+// their own, much larger threshold.
+func (s *Store) ResetStaleType(ctx context.Context, maxAge time.Duration, jobType string) (int, error) {
+	if jobType == "" {
+		return s.ResetStale(ctx, maxAge)
+	}
+	return s.resetStale(ctx, maxAge, "type=?", jobType)
+}
+
+// ResetStaleExceptType is ResetStale for every job type except jobType.
+func (s *Store) ResetStaleExceptType(ctx context.Context, maxAge time.Duration, jobType string) (int, error) {
+	if jobType == "" {
+		return s.ResetStale(ctx, maxAge)
+	}
+	return s.resetStale(ctx, maxAge, "type<>?", jobType)
+}
+
+func (s *Store) resetStale(ctx context.Context, maxAge time.Duration, filter string, arg string) (int, error) {
 	if maxAge < 0 {
 		return 0, errors.New("jobstore: stale age cannot be negative")
 	}
@@ -245,11 +295,16 @@ func (s *Store) ResetStale(ctx context.Context, maxAge time.Duration) (int, erro
 	}
 	cutoff := s.now().UTC().Add(-maxAge)
 	now := s.now().UTC()
-	result, err := s.db.ExecContext(ctx, `
+	query := `
 		UPDATE jobs
 		SET status=?, available_at=?, locked_at=NULL, locked_by=NULL, updated_at=?
-		WHERE status=? AND locked_at IS NOT NULL AND locked_at<=?`,
-		PENDING, now, now, PROCESSING, cutoff)
+		WHERE status=? AND locked_at IS NOT NULL AND locked_at<=?`
+	args := []any{PENDING, now, now, PROCESSING, cutoff}
+	if filter != "" {
+		query += " AND " + filter
+		args = append(args, arg)
+	}
+	result, err := s.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return 0, fmt.Errorf("jobstore: reset stale jobs: %w", err)
 	}
@@ -293,14 +348,14 @@ func (s *Store) CountByStatus(ctx context.Context, status Status) (int, error) {
 	return count, nil
 }
 
-const jobColumns = `id, type, kind, model, engine, payload, input_json, result_json, output_path, output_mime, status, attempts, available_at, locked_at, locked_by, completed_at, error, created_at, updated_at`
+const jobColumns = `id, type, kind, model, engine, owner_key_id, payload, input_json, result_json, output_path, output_mime, status, attempts, available_at, locked_at, locked_by, completed_at, error, created_at, updated_at`
 const selectJobSQL = `SELECT ` + jobColumns + ` FROM jobs`
 
 func (s *Store) scanJob(row interface{ Scan(...any) error }) (Job, error) {
 	var job Job
 	var lockedAt, completedAt sql.NullTime
 	var lockedBy, failure sql.NullString
-	if err := row.Scan(&job.ID, &job.Type, &job.Kind, &job.Model, &job.Engine, &job.Payload,
+	if err := row.Scan(&job.ID, &job.Type, &job.Kind, &job.Model, &job.Engine, &job.OwnerKeyID, &job.Payload,
 		&job.InputJSON, &job.ResultJSON, &job.OutputPath, &job.OutputMIME, &job.Status, &job.Attempts,
 		&job.AvailableAt, &lockedAt, &lockedBy, &completedAt, &failure,
 		&job.CreatedAt, &job.UpdatedAt); err != nil {

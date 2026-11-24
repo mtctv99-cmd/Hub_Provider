@@ -6,9 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
-	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,19 @@ import (
 	"sever_provider/internal/scheduler"
 	"sever_provider/internal/settings"
 	"sever_provider/internal/workerhub"
+)
+
+const (
+	// DefaultJobConcurrency bounds process-wide jobs in flight. Video jobs can
+	// hold up to 100 MB each, so an unbounded claim loop is an OOM risk.
+	DefaultJobConcurrency = 8
+	MaxJobConcurrency     = 64
+	// DefaultVideoTimeout is shared by the runner, the supervisor's stale
+	// window and the startup check.
+	DefaultVideoTimeout = 45 * time.Minute
+	// VideoStaleBuffer is added to VideoTimeout before a PROCESSING video job
+	// may be reset; the supervisor also enforces a 60m floor.
+	VideoStaleBuffer = 15 * time.Minute
 )
 
 type TTSRequest struct {
@@ -52,11 +66,24 @@ type Runner struct {
 	Files             *filestore.Store
 	Poll              time.Duration
 	Timeout           time.Duration
+	VideoTimeout      time.Duration
 	WorkerID          string
 	TikTokConcurrency int
 	TikTokSlots       chan struct{}
 	Settings          *settings.Store
-	Once              sync.Once
+	// MaxConcurrency caps jobs in flight across the runner. Zero uses
+	// JOB_MAX_CONCURRENCY or DefaultJobConcurrency.
+	MaxConcurrency int
+	// Slots is the concurrency semaphore. It is created by Start.
+	Slots chan struct{}
+	Once  sync.Once
+
+	// processFn overrides the type-specific processor in tests. It never
+	// changes production behavior because it is unexported.
+	processFn func(context.Context, jobstore.Job) error
+
+	wg       sync.WaitGroup
+	loopDone chan struct{}
 }
 
 func (r *Runner) Start(ctx context.Context) {
@@ -65,6 +92,11 @@ func (r *Runner) Start(ctx context.Context) {
 	}
 	if r.Timeout <= 0 {
 		r.Timeout = 5 * time.Minute
+	}
+	if r.VideoTimeout <= 0 {
+		// Colab/T4 video generation is far slower than chat; keep the stale-job
+		// reaper from killing a healthy generation.
+		r.VideoTimeout = DefaultVideoTimeout
 	}
 	if r.WorkerID == "" {
 		r.WorkerID = "unified-runner"
@@ -78,36 +110,134 @@ func (r *Runner) Start(ctx context.Context) {
 	if r.TikTokSlots == nil {
 		r.TikTokSlots = make(chan struct{}, r.TikTokConcurrency)
 	}
-	r.Once.Do(func() { go r.loop(ctx) })
+	r.initConcurrency()
+	r.Once.Do(func() {
+		r.loopDone = make(chan struct{})
+		go func() {
+			defer close(r.loopDone)
+			r.loop(ctx)
+		}()
+	})
+}
+
+func (r *Runner) initConcurrency() {
+	if r.MaxConcurrency <= 0 && r.Slots != nil {
+		r.MaxConcurrency = cap(r.Slots)
+	}
+	if r.MaxConcurrency <= 0 {
+		r.MaxConcurrency = jobConcurrencyFromEnv()
+	}
+	if r.MaxConcurrency < 1 {
+		r.MaxConcurrency = 1
+	}
+	if r.MaxConcurrency > MaxJobConcurrency {
+		r.MaxConcurrency = MaxJobConcurrency
+	}
+	if r.Slots == nil {
+		r.Slots = make(chan struct{}, r.MaxConcurrency)
+	}
+}
+
+func jobConcurrencyFromEnv() int {
+	value, err := strconv.Atoi(strings.TrimSpace(os.Getenv("JOB_MAX_CONCURRENCY")))
+	if err != nil || value <= 0 {
+		return DefaultJobConcurrency
+	}
+	if value > MaxJobConcurrency {
+		return MaxJobConcurrency
+	}
+	return value
+}
+
+// tryAcquireSlot takes a job slot without blocking. The caller must not claim a
+// job when it returns false.
+func (r *Runner) tryAcquireSlot() bool {
+	select {
+	case r.Slots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (r *Runner) releaseSlot() {
+	<-r.Slots
+}
+
+// Wait blocks until the claim loop has stopped and every in-flight job has
+// returned. Call it after canceling the Start context; it never claims new work.
+func (r *Runner) Wait(ctx context.Context) error {
+	if r.loopDone != nil {
+		select {
+		case <-r.loopDone:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	done := make(chan struct{})
+	go func() {
+		r.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (r *Runner) loop(ctx context.Context) {
 	ticker := time.NewTicker(r.Poll)
 	defer ticker.Stop()
-	_, _ = r.Jobs.ResetStale(ctx, r.Timeout)
+	// Recover abandoned PROCESSING rows from a previous process, keeping video
+	// jobs on their longer window.
+	if n, err := r.Jobs.ResetStaleExceptType(ctx, r.Timeout, "video"); err == nil && n > 0 {
+		log.Printf("[JOBS] reset %d stale non-video processing jobs", n)
+	}
+	if n, err := r.Jobs.ResetStaleType(ctx, r.VideoTimeout+VideoStaleBuffer, "video"); err == nil && n > 0 {
+		log.Printf("[JOBS] reset %d stale video processing jobs", n)
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			for i := 0; i < 8; i++ {
+				if !r.tryAcquireSlot() {
+					break
+				}
 				job, err := r.Jobs.ClaimNext(ctx, r.WorkerID)
 				if errors.Is(err, jobstore.ErrNoJobs) {
+					r.releaseSlot()
 					break
 				}
 				if err != nil {
+					r.releaseSlot()
 					break
 				}
-				go r.process(ctx, job)
+				r.wg.Add(1)
+				go func(job jobstore.Job) {
+					defer r.wg.Done()
+					defer r.releaseSlot()
+					r.process(ctx, job)
+				}(job)
 			}
 		}
 	}
 }
 
 func (r *Runner) process(parent context.Context, job jobstore.Job) {
-	ctx, cancel := context.WithTimeout(parent, r.Timeout)
+	timeout := r.Timeout
+	if strings.EqualFold(job.Type, "video") && r.VideoTimeout > 0 {
+		timeout = r.VideoTimeout
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	var err error
+	if r.processFn != nil {
+		err = r.processFn(ctx, job)
+	} else {
 		switch strings.ToLower(job.Type) {
 		case "tts":
 			err = r.processTTS(ctx, job)
@@ -118,9 +248,19 @@ func (r *Runner) process(parent context.Context, job jobstore.Job) {
 		default:
 			err = fmt.Errorf("unsupported job type %q", job.Type)
 		}
-	if err != nil {
-		_ = r.Jobs.Fail(context.Background(), job.ID, err)
 	}
+	if err == nil {
+		return
+	}
+	if parent.Err() != nil {
+		// Shutdown/caller cancellation is not a job failure. Put the job back
+		// so the next process can claim it instead of marking it FAILED.
+		if requeueErr := r.Jobs.Requeue(context.Background(), job.ID); requeueErr != nil && !errors.Is(requeueErr, jobstore.ErrNotFound) {
+			log.Printf("[JOBS] requeue %s during shutdown failed: %v", job.ID, requeueErr)
+		}
+		return
+	}
+	_ = r.Jobs.Fail(context.Background(), job.ID, err)
 }
 
 func (r *Runner) processTTS(ctx context.Context, job jobstore.Job) error {
@@ -233,8 +373,8 @@ func (r *Runner) processLLM(ctx context.Context, job jobstore.Job) error {
 // processVideo generates a video through the dispatcher, downloads the bytes
 // when only a CDN URL is returned, and stores them in the media store.
 func (r *Runner) processVideo(ctx context.Context, job jobstore.Job) error {
-	if r.Dispatcher == nil {
-		return errors.New("dispatcher is unavailable")
+	if r.Dispatcher == nil && r.Workers == nil {
+		return errors.New("no video backend is configured")
 	}
 	var req VideoJobRequest
 	if err := json.Unmarshal(job.Payload, &req); err != nil {
@@ -247,13 +387,20 @@ func (r *Runner) processVideo(ctx context.Context, job jobstore.Job) error {
 	if strings.TrimSpace(req.Prompt) == "" {
 		return errors.New("video prompt is required")
 	}
-	resp, err := r.Dispatcher.Video(ctx, provider.VideoRequest{
+	videoReq := provider.VideoRequest{
 		Model:     model,
 		Prompt:    req.Prompt,
 		Duration:  req.Duration,
 		Size:      req.Size,
 		SessionID: req.SessionID,
-	})
+	}
+	var resp provider.VideoResponse
+	var err error
+	if r.Workers != nil && r.Workers.Available(model) {
+		resp, err = r.Workers.Video(ctx, videoReq)
+	} else {
+		resp, err = r.Dispatcher.Video(ctx, videoReq)
+	}
 	if err != nil {
 		return err
 	}
@@ -295,22 +442,17 @@ func (r *Runner) processVideo(ctx context.Context, job jobstore.Job) error {
 const maxGeneratedVideoBytes = 100 * 1024 * 1024
 
 // downloadUpstreamVideo fetches generated video bytes from a provider CDN URL.
+// It reuses the image download SSRF guard: https-only, no credentials/IP
+// literals, public DNS resolution and private/loopback/CGNAT addresses rejected
+// on every redirect.
 func downloadUpstreamVideo(ctx context.Context, rawURL string) ([]byte, string, error) {
-	videoURL, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil || videoURL.Scheme != "https" || videoURL.Host == "" {
-		return nil, "", fmt.Errorf("invalid video url")
+	rawURL = strings.TrimSpace(rawURL)
+	if err := provider.ValidateImageURL(rawURL, false); err != nil {
+		return nil, "", fmt.Errorf("invalid video url: %w", err)
 	}
-	client := &http.Client{Timeout: 120 * time.Second}
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 4 {
-			return errors.New("video redirect limit exceeded")
-		}
-		if req.URL.Scheme != "https" {
-			return errors.New("video redirect target must be https")
-		}
-		return nil
-	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, videoURL.String(), nil)
+	client, closeIdle := provider.NewImageClient(120*time.Second, false)
+	defer closeIdle()
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, "", err
 	}

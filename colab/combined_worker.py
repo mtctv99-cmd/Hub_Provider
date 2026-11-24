@@ -533,7 +533,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--server', required=True, help='WorkerHub websocket URL')
     parser.add_argument('--worker-id', default='colab-combined')
-    parser.add_argument('--token', default=os.environ.get('WORKER_TOKEN', 'omni-secret-key-123'), help='Worker authentication token')
+    parser.add_argument('--token', default=( __import__("os").environ.get("WORKER_AUTH_TOKEN") or __import__("sys").exit("set WORKER_AUTH_TOKEN in the environment") ), help='Worker authentication token')
     parser.add_argument('--model-id', help='Must match a google_colab chat model in --config; auto-selected only when exactly one exists')
     parser.add_argument('--config', type=Path, default=Path('config/models.yaml'))
     parser.add_argument('--gguf', type=Path, default=Path('models/gemma-4-E2B-it-ultra-uncensored-heretic-Q4_K_M.gguf'))
@@ -554,7 +554,7 @@ def main(argv=None):
     parser.add_argument('--tts-gpu', action='store_true', help='Use CUDA GPU for Piper and Khmer TTS models')
     parser.add_argument('--queue-size', type=int, default=32, help='Internal job queue size per voice (default: 32)')
     args = parser.parse_args(argv)
-    token = args.token or os.environ.get('WORKER_TOKEN', 'omni-secret-key-123')
+    token = args.token or ( __import__("os").environ.get("WORKER_AUTH_TOKEN") or __import__("sys").exit("set WORKER_AUTH_TOKEN in the environment") )
     if not token:
         parser.error('WORKER_TOKEN environment variable or --token required')
     if args.queue_size < 1 or args.khmer_sample_rate < 1:

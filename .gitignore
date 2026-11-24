@@ -9,6 +9,10 @@
 NUL
 temp_*
 sever-provider*
+!deploy/systemd/
+!deploy/systemd/sever-provider.service
+!deploy/systemd/sever-provider-backup.service
+!deploy/systemd/sever-provider-backup.timer
 ds2api_temp/
 
 # Large Model Files
@@ -53,3 +57,6 @@ Thumbs.db
 
 *.wav
 *cookies*.txt
+
+# local R&D probe artifacts
+.probe/

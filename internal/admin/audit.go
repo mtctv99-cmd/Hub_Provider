@@ -16,6 +16,8 @@ type AuditEvent struct {
 	Model     string
 	AccountID string
 	Latency   time.Duration
+	TTFT      time.Duration
+	Outcome   string
 	ErrorKind string
 	Detail    string
 }
@@ -25,6 +27,31 @@ type AuditLogger struct {
 }
 
 func NewAuditLogger(db *sql.DB) *AuditLogger { return &AuditLogger{db: db} }
+
+// inferProvider fills the provider column for events recorded by handlers that
+// only know the public model id. The dispatcher owns the authoritative provider;
+// this is a best-effort attribution for dashboards and retention analysis.
+func inferProvider(model string) string {
+	m := strings.ToLower(strings.TrimSpace(model))
+	switch {
+	case strings.Contains(m, "gemini"):
+		return "gemini_web"
+	case strings.Contains(m, "gpt"), strings.Contains(m, "copilot"):
+		return "copilot_ws"
+	case strings.Contains(m, "deepseek"):
+		return "deepseek_web"
+	case strings.Contains(m, "tiktok"), strings.HasPrefix(m, "bv0"):
+		return "tiktok_api"
+	case strings.HasPrefix(m, "piper:"):
+		return "piper_local"
+	case strings.Contains(m, "colab"), strings.Contains(m, "gemma"):
+		return "google_colab"
+	case strings.Contains(m, "muse"):
+		return "meta_web"
+	default:
+		return ""
+	}
+}
 
 func (l *AuditLogger) Record(ctx context.Context, event AuditEvent) error {
 	if l == nil || l.db == nil {
@@ -40,12 +67,25 @@ func (l *AuditLogger) Record(ctx context.Context, event AuditEvent) error {
 	if len(detail) > 1000 {
 		detail = detail[:1000]
 	}
+	outcome := strings.TrimSpace(event.Outcome)
+	if outcome == "" {
+		if event.ErrorKind == "" {
+			outcome = "success"
+		} else {
+			outcome = "error"
+		}
+	}
+	provider := strings.TrimSpace(event.Provider)
+	if provider == "" {
+		provider = inferProvider(event.Model)
+	}
 	_, err := l.db.ExecContext(ctx, `INSERT INTO observability_events
-        (request_id, event_type, provider, model, account_id, latency_ms, error_kind, detail)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        (request_id, event_type, provider, model, account_id, latency_ms, ttft_ms, outcome, error_kind, detail)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		strings.TrimSpace(event.RequestID), strings.TrimSpace(event.EventType),
-		strings.TrimSpace(event.Provider), strings.TrimSpace(event.Model),
+		provider, strings.TrimSpace(event.Model),
 		strings.TrimSpace(event.AccountID), event.Latency.Milliseconds(),
+		event.TTFT.Milliseconds(), outcome,
 		strings.TrimSpace(event.ErrorKind), detail)
 	return err
 }

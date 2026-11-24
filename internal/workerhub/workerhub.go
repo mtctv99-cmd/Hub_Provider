@@ -77,6 +77,7 @@ type Event struct {
 	Text        string          `json:"text,omitempty"`
 	Error       string          `json:"error,omitempty"`
 	AudioBase64 string          `json:"audio_base64,omitempty"`
+	VideoBase64 string          `json:"video_base64,omitempty"`
 	MIME        string          `json:"mime,omitempty"`
 	Done        bool            `json:"done,omitempty"`
 	Raw         json.RawMessage `json:"-"`
@@ -554,13 +555,31 @@ func (w *worker) send(message any) error {
 	return w.conn.WriteJSON(message)
 }
 
+// busyReadDeadline is the pong allowance while a worker has an active request.
+// Long video jobs run Python/GPU code that can starve the worker's heartbeat
+// thread for minutes; request-level timeouts still bound a genuinely dead
+// worker, so the socket must not be closed mid-generation.
+const busyReadDeadline = 45 * time.Minute
+
+func (w *worker) extendReadDeadline() {
+	deadline := w.hub.cfg.HeartbeatTimeout
+	w.mu.Lock()
+	if w.info.Active > 0 && deadline < busyReadDeadline {
+		deadline = busyReadDeadline
+	}
+	w.mu.Unlock()
+	_ = w.conn.SetReadDeadline(time.Now().Add(deadline))
+}
+
 func (w *worker) readLoop() {
 	w.conn.SetPongHandler(func(string) error {
 		w.mu.Lock()
 		w.info.LastSeen = time.Now()
 		w.mu.Unlock()
-		return w.conn.SetReadDeadline(time.Now().Add(w.hub.cfg.HeartbeatTimeout))
+		w.extendReadDeadline()
+		return nil
 	})
+	w.extendReadDeadline()
 	for {
 		_, data, err := w.conn.ReadMessage()
 		if err != nil {
@@ -623,7 +642,7 @@ func (w *worker) handleEvent(envelope map[string]json.RawMessage, typ string) {
 		w.mu.Unlock()
 		return
 	}
-	terminal := typ == "token_end" || typ == "job_result" || typ == "audio_result" || typ == "error" || rawBool(envelope["done"])
+	terminal := typ == "token_end" || typ == "job_result" || typ == "audio_result" || typ == "video_result" || typ == "error" || rawBool(envelope["done"])
 	if terminal {
 		delete(w.pending, id)
 		w.releaseModel(p.model)
@@ -632,7 +651,7 @@ func (w *worker) handleEvent(envelope map[string]json.RawMessage, typ string) {
 		}
 	}
 
-	event := Event{Type: typ, RequestID: id, Delta: rawString(envelope["delta"]), Text: rawString(envelope["text"]), Error: rawString(envelope["error"]), AudioBase64: rawString(envelope["audio_base64"]), MIME: rawString(envelope["mime"]), Done: rawBool(envelope["done"]), Raw: append(json.RawMessage(nil), mustJSON(envelope)...)}
+	event := Event{Type: typ, RequestID: id, Delta: rawString(envelope["delta"]), Text: rawString(envelope["text"]), Error: rawString(envelope["error"]), AudioBase64: rawString(envelope["audio_base64"]), VideoBase64: rawString(envelope["video_base64"]), MIME: rawString(envelope["mime"]), Done: rawBool(envelope["done"]), Raw: append(json.RawMessage(nil), mustJSON(envelope)...)}
 	if typ == "error" && event.Error == "" {
 		event.Error = "worker returned an error"
 	}
