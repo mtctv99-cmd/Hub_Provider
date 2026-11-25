@@ -307,6 +307,18 @@ func (a *Adapter) Speech(ctx context.Context, req provider.SpeechRequest, creden
 	return out.Bytes(), "audio/mpeg", nil
 }
 
+// Probe performs one minimal synthesis with sessionID to verify that TikTok
+// still accepts the session. It deliberately bypasses the pool: a health check
+// must not consume the throttle/cooldown state that live traffic depends on.
+func (a *Adapter) Probe(ctx context.Context, sessionID string) error {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return errors.New("tiktok probe: empty session")
+	}
+	_, err := a.generatePart(ctx, sessionID, "xin chào", "BV074_streaming")
+	return err
+}
+
 var errRateLimited = errors.New("tiktok rate limited")
 
 func (a *Adapter) generatePart(ctx context.Context, session, text, voice string) ([]byte, error) {

@@ -41,6 +41,7 @@ import (
 	"sever_provider/internal/secret"
 	"sever_provider/internal/session"
 	"sever_provider/internal/settings"
+	"sever_provider/internal/tiktokhealth"
 	"sever_provider/internal/workerhub"
 )
 
@@ -75,7 +76,8 @@ func main() {
 	piperAdapter := piper.New(os.Getenv("PIPER_BIN"), os.Getenv("PIPER_MODELS_DIR"))
 	registry.Register(piperAdapter)
 	tiktokPool := tiktok.NewPool(nil)
-	registry.Register(tiktok.New(nil, tiktokPool))
+	tiktokAdapter := tiktok.New(nil, tiktokPool)
+	registry.Register(tiktokAdapter)
 	geminiAdapter := gemini.New(nil)
 	registry.Register(geminiAdapter)
 	registry.Register(copilot.New(nil))
@@ -166,6 +168,11 @@ func main() {
 			}
 		}
 	}()
+	// The scheduler orders HEALTHY credentials first, so a TikTok account that
+	// failed transiently stays DEGRADED and idle while healthy capacity lasts.
+	// Revalidate it against the upstream endpoint and clear the status on
+	// success instead of waiting for traffic to grow past the healthy pool.
+	go tiktokhealth.Run(reclaimCtx, identityManager, tiktokAdapter, tiktokhealth.Config{Logf: log.Printf})
 	breakers := scheduler.NewBreakerRegistry()
 	sessions, err := session.NewPersistent(database.DB)
 	if err != nil {
